@@ -1,6 +1,7 @@
 #ifndef LA_OBJECT_POOL_H
 #define LA_OBJECT_POOL_H
 
+#include <concepts>
 #include <functional>
 #include <list>
 #include <memory>
@@ -26,26 +27,37 @@ public:
     /**
      * @brief Construct a new pool object.
      *
-     * @tparam Args
      * @param args Arguments passed to operator new when creating new object.
      */
     template<typename... Args>
+        requires (std::copy_constructible<Args>, ...)
     explicit pool(Args&&... args)
-    : m_factory([args...] { return new T(args...); }){};
+    : m_factory([... args = std::forward<Args>(args)] { return new T(args...); }){};
 
     /**
      * @brief Construct a new pool object.
      *
-     * @param factory Creates object and returns pointer to created object.
+     * @param factory Must allocate memory, construct object and return a pointer to the constructed object.
+     * Object is deleted using `[](T* ptr){ delete ptr; }`
      */
-    explicit pool(std::function<T*()> factory)
-    : m_factory(std::move(factory)){};
+    template<typename F>
+        requires std::constructible_from<std::function<T*()>, F>
+    explicit pool(F&& factory)
+    : m_factory(std::forward<F>(factory))
+    , m_deleter([](T* ptr) { delete ptr; }){};
 
-    // template<typename... Args>
-    // explicit pool(Args&&... args)
-    // : m_factory([... args = std::forward<Args>(args)]{
-    //     return new T(args...);
-    // }){};
+    /**
+     * @brief Construct a new pool object
+     * 
+     * @param factory Must allocate memory, construct object and return a pointer to the constructed object.
+     * @param deleter Must destruct object and deallocate memory pointed to by ptr. Invoked as `T* ptr; deleter(ptr);`.
+     */
+    template<typename F, typename D>
+        requires std::constructible_from<std::function<T*()>, F> &&
+                     std::constructible_from<std::function<void(T*)>, D>
+    explicit pool(F&& factory, D&& deleter)
+    : m_factory(std::forward<F>(factory))
+    , m_deleter(std::forward<D>(deleter)){};
 
     ~pool()
     {
@@ -92,7 +104,7 @@ public:
         return pooled_ptr(this, l_new_ptr);
     };
     /**
-     * @brief Tries to acquire a free object from pool. If no free objects are available returns empty pooled_ptr.
+     * @brief Attempts to acquire a free object from pool. If no free objects are available returns empty pooled_ptr.
      *
      * @return pooled_ptr<T> Smart pointer to the object. Empty if no free objects are available.
      */
@@ -150,15 +162,16 @@ private:
     std::list<T*> m_object_list{};
     std::list<T*> m_free_list{};
 
-    const std::function<T*()> m_factory;
+    const std::function<T*()>     m_factory;
+    const std::function<void(T*)> m_deleter;
 
     mutable std::mutex pool_mutex;
 };
 
 /**
- * @brief Smart pointer that manages object from pool<>.
- * pooled_ptr may alternatively manage no object.
- * If pooled_ptr manages an object, pooled_ptr releases object back into pool when it goes out of scope.
+ * @brief Smart pointer that manages an object from pool<>.
+ * A pooled_ptr may also manage no objects.
+ * If pooled_ptr manages an object, pooled_ptr releases object back into the parent pool when it goes out of scope.
  * pooled_ptr is move constructable and move assignable, but neigher copy constructable nor copy assignable.
  *
  * @tparam T
@@ -176,7 +189,7 @@ class pooled_ptr
 
 public:
     /**
-     * @brief Construct a new pooled_ptr object that manages no object.
+     * @brief Construct a new pooled_ptr object that manages no objects.
      *
      */
     pooled_ptr() = default;
@@ -198,6 +211,12 @@ public:
     pooled_ptr(const pooled_ptr&)            = delete;
     pooled_ptr& operator=(const pooled_ptr&) = delete;
 
+    /**
+     * @brief Constructs and returns a shared_ptr that manages an object currently managed by *this.
+     * Manages no objects after return.
+     * 
+     * @return std::shared_ptr<T> 
+     */
     explicit operator std::shared_ptr<T>()
     {
         if (m_parent_pool != nullptr)
@@ -211,18 +230,18 @@ public:
         }
         return {};
     }
-
+    // NOLINTBEGIN(google-explicit-constructor, hicpp-explicit-conversions)
     /**
      * @brief Returns true if pooled_ptr manages an object.
      *
      * @return true Manages object.
      * @return false Manages no object.
      */
-    // NOLINTNEXTLINE(google-explicit-constructor, hicpp-explicit-conversions)
     operator bool() const noexcept
     {
         return (m_parent_pool != nullptr);
     }
+    //NOLINTEND(google-explicit-constructor, hicpp-explicit-conversions)
 
     /**
      * @brief Returns a pointer to the managed object.
@@ -253,7 +272,7 @@ public:
     }
 
     /**
-     * @brief Releases managed object back into pool. Manages no object afterwards.
+     * @brief Releases managed object back into the parent pool. Manages no objects afterwards.
      *
      */
     inline void release()

@@ -5,13 +5,10 @@ if( CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR )
     include_directories( ${CMAKE_CURRENT_SOURCE_DIR})
 
     add_executable(tests
-        tests/test_queue.cpp)
+        tests/test_pool.cpp)
     set_target_properties(tests PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED True)
 
 else()
     add_library(la_util STATIC)
     target_include_directories(la_util INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
 endif()
-# set(CPACK_PROJECT_NAME ${PROJECT_NAME})
-# set(CPACK_PROJECT_VERSION ${PROJECT_VERSION})
-# include(CPack)
