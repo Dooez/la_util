@@ -15,7 +15,8 @@ concept move_or_copy_constructable =
  *
  * @tparam T
  */
-template<move_or_copy_constructable T>
+template<typename T>
+    requires move_or_copy_constructable<T>
 class mt_queue
 {
 public:

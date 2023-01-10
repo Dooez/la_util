@@ -151,17 +151,17 @@ private:
 };
 
 template<typename... Types>
-void test_queues(Types&&... Args)
+void test_queues(Types&&... queues)
 {
     constexpr uint test_size = 2;
     std::cout << "Pushing into queues\n";
     for (uint i = 0; i < test_size; ++i)
     {
-        (Args.push(typename std::remove_reference<decltype(Args)>::type::value_type(std::rand())),
+        (queues.push(typename std::remove_reference<decltype(queues)>::type::value_type(std::rand())),
          ...);
     }
     std::cout << "Popping queues\n";
-    while ((static_cast<bool>(Args.pop()) || ...))
+    while ((static_cast<bool>(queues.pop()) || ...))
     {
     };
 }
