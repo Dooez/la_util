@@ -6,19 +6,21 @@
 #include <queue>
 
 namespace la {
+template<typename T>
+concept move_or_copy_constructable =
+    std::is_move_constructible_v<T> || std::is_copy_constructible_v<T>;
 
 /**
  * @brief Thread-safe queue.
  *
  * @tparam T
  */
-template<typename T>
-
+template<move_or_copy_constructable T>
 class mt_queue
 {
-    static_assert(std::is_move_constructible_v<T>, "mt_queue requires move/copy construction");
-
 public:
+    using value_type = T;
+
     mt_queue()  = default;
     ~mt_queue() = default;
 
@@ -44,14 +46,33 @@ public:
      *
      * @return std::optional<T>
      */
-    [[nodiscard]] std::optional<T> pop()
+    [[nodiscard]] auto pop() -> std::optional<T>
+        requires std::is_move_constructible_v<T>
     {
         std::scoped_lock<std::mutex> lock(queue_mutex);
         if (m_unsafe_queue.empty())
         {
             return {};
         }
-        T tmp = std::move(m_unsafe_queue.front());
+        std::optional<T> tmp = std::move(m_unsafe_queue.front());
+        m_unsafe_queue.pop();
+        return tmp;
+    }
+
+    /**
+     * @brief If queue contains elements removes an element from the front of the queue
+     * and returns optional containing removed element; If queue is empty returns empty optional;
+     *
+     * @return std::optional<T>
+     */
+    [[nodiscard]] auto pop() -> std::optional<T>
+    {
+        std::scoped_lock<std::mutex> lock(queue_mutex);
+        if (m_unsafe_queue.empty())
+        {
+            return {};
+        }
+        std::optional<T> tmp = m_unsafe_queue.front();
         m_unsafe_queue.pop();
         return tmp;
     }
@@ -61,7 +82,18 @@ public:
      *
      * @param item
      */
+    void push(const T& item)
+    {
+        std::scoped_lock<std::mutex> lock(queue_mutex);
+        m_unsafe_queue.push(item);
+    }
+    /**
+     * @brief Inserts the given element into the back of the queue;
+     *
+     * @param item
+     */
     void push(T&& item)
+        requires std::is_move_constructible_v<T>
     {
         std::scoped_lock<std::mutex> lock(queue_mutex);
         m_unsafe_queue.push(std::forward<T>(item));
