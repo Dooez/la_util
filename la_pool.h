@@ -30,7 +30,7 @@ public:
      * @param args Arguments passed to operator new when creating new object.
      */
     template<typename... Args>
-        requires std::constructible_from<T, Args...>
+        requires std::constructible_from<T, Args...> && (std::copy_constructible<Args> && ...)
     explicit pool(Args&&... args)
     : m_factory([... args = std::forward<Args>(args)] { return new T(args...); }){};
 
