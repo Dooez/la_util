@@ -1,4 +1,5 @@
 #include "la_pool.h"
+#include "test_base.h"
 
 #include <iostream>
 class C_movconable
@@ -160,6 +161,32 @@ void test_pools(Types&&... pools)
     std::cout << "\n";
 }
 
+template<typename T>
+void test_pool(T& o)
+{
+    auto pool = la::pool<std::remove_reference_t<decltype(o)>>();
+    {
+        auto acq0 = pool.acquire_free();
+        auto acq1 = pool.acquire();
+        acq0      = pool.acquire_free();
+        acq1.release();
+        acq0 = pool.acquire_free();
+        pool.populate(1);
+        auto sh_ptr = static_cast<std::shared_ptr<T>>(acq0);
+    }
+    std::cout << pool.size() << "\n";
+}
+
+template<uint I, typename... Types>
+void apple(const std::tuple<Types...>& tuple)
+{
+    test_pool(std::get<I>(tuple));
+    if constexpr (I < sizeof...(Types) - 1)
+    {
+        apple<I + 1>(tuple);
+    }
+}
+
 int main()
 {
     C_copymov sample(0);
@@ -172,11 +199,13 @@ int main()
     test_pools(pool, pool_factory, pool_factory_del);
 
     // la::pool<C_none> none_p(C_none(0)); // Error, non-copiable construction args
-    
+
     la::pool<C_copymov>     copymov_p(0);
     la::pool<C_copyconable> copycon_p(0);
     la::pool<C_movable>     mov_p(0);
     la::pool<C_movconable>  movcon_p(0);
     test_pools(copymov_p, copycon_p, mov_p, movcon_p);
+
+    apple<0>(dummy_tuple{});
     return 0;
 }

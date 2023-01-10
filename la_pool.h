@@ -30,7 +30,7 @@ public:
      * @param args Arguments passed to operator new when creating new object.
      */
     template<typename... Args>
-        requires (std::copy_constructible<Args>, ...)
+        requires std::constructible_from<T, Args...>
     explicit pool(Args&&... args)
     : m_factory([... args = std::forward<Args>(args)] { return new T(args...); }){};
 
@@ -48,7 +48,7 @@ public:
 
     /**
      * @brief Construct a new pool object
-     * 
+     *
      * @param factory Must allocate memory, construct object and return a pointer to the constructed object.
      * @param deleter Must destruct object and deallocate memory pointed to by ptr. Invoked as `T* ptr; deleter(ptr);`.
      */
@@ -214,8 +214,8 @@ public:
     /**
      * @brief Constructs and returns a shared_ptr that manages an object currently managed by *this.
      * Manages no objects after return.
-     * 
-     * @return std::shared_ptr<T> 
+     *
+     * @return std::shared_ptr<T>
      */
     explicit operator std::shared_ptr<T>()
     {
