@@ -161,20 +161,40 @@ void test_pools(Types&&... pools)
     std::cout << "\n";
 }
 
+
+template<typename T>
+void test_pool_inner(T& pool)
+{
+    auto acq0 = pool.acquire_free();
+    auto acq1 = pool.acquire();
+    acq0      = pool.acquire_free();
+    acq1.release();
+    acq0 = pool.acquire_free();
+    pool.populate(1);
+    auto sh_ptr = static_cast<std::shared_ptr<typename decltype(acq0)::element_type>>(acq0);
+}
+
 template<typename T>
 void test_pool(T& o)
 {
-    auto pool = la::pool<std::remove_reference_t<decltype(o)>>();
+    std::cout << "Testing " << typeid(o).name() << ": ";
+    if constexpr (std::is_default_constructible_v<std::remove_cvref_t<decltype(o)>>)
     {
-        auto acq0 = pool.acquire_free();
-        auto acq1 = pool.acquire();
-        acq0      = pool.acquire_free();
-        acq1.release();
-        acq0 = pool.acquire_free();
-        pool.populate(1);
-        auto sh_ptr = static_cast<std::shared_ptr<T>>(acq0);
+        std::cout << "default ";
+        auto pool = la::pool<std::remove_cvref_t<decltype(o)>>();
+        test_pool_inner(pool);
     }
-    std::cout << pool.size() << "\n";
+    if constexpr (std::is_copy_constructible_v<std::remove_reference_t<decltype(o)>>)
+    {
+        std::cout << "copy ";
+        auto pool = la::pool<std::remove_reference_t<decltype(o)>>(o);
+        test_pool_inner(pool);
+    }
+
+    std::cout << "value ";
+    auto pool = la::pool<std::remove_reference_t<decltype(o)>>(1);
+    test_pool_inner(pool);
+    std::cout << "\n";
 }
 
 template<uint I, typename... Types>

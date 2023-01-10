@@ -188,6 +188,7 @@ class pooled_ptr
     }
 
 public:
+    using element_type = T;
     /**
      * @brief Construct a new pooled_ptr object that manages no objects.
      *
