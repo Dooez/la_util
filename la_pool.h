@@ -24,6 +24,8 @@ class pool
     friend class pooled_ptr<T>;
 
 public:
+    using value_type = T;
+
     /**
      * @brief Construct a new pool object.
      *
