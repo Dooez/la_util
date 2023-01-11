@@ -47,7 +47,7 @@ int test_pool(T&& pool)
 template<typename T>
 int test_pool_ctor(T&& object)
 {
-    using value_t = std::remove_cvref_t<T>;
+    using value_t = std::remove_reference_t<T>;
 
     int ret = 0;
     if constexpr (std::constructible_from<value_t>)
@@ -73,13 +73,11 @@ int test_pool_ctor(T&& object)
     return ret;
 }
 
-
 template<typename... Types>
 int test_pools(Types&&... args)
 {
     return (test_pool_ctor(args) + ...);
 }
-
 
 int main()
 {
