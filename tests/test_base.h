@@ -1,6 +1,8 @@
 #include <iostream>
 #include <tuple>
 
+inline bool should_print = false;
+
 template<bool Def_C, bool Cpy_C, bool Cpy_A, bool Mov_C, bool Mov_A>
 class class_dummy
 {
@@ -15,27 +17,62 @@ public:
     = default;
     class_dummy(const class_dummy& other)
         requires Cpy_C
-    = default;
+    : m_data(other.m_data)
+    {
+        if (should_print)
+        {
+            std::cout << "copy ctor ";
+            cout_name();
+        }
+    }
     class_dummy& operator=(const class_dummy& other)
         requires Cpy_A
     {
         m_data = other.m_data;
+        if (should_print)
+        {
+            std::cout << "copy ass ";
+            cout_name();
+        }
         return *this;
     };
 
     class_dummy(class_dummy&& other) noexcept
         requires Mov_C
-    = default;
+    : m_data(other.m_data)
+    {
+        if (should_print)
+        {
+            std::cout << "mov ctor ";
+            cout_name();
+        }
+    }
     class_dummy& operator=(class_dummy&& other) noexcept
         requires Mov_A
     {
         m_data = other.m_data;
+        if (should_print)
+        {
+            std::cout << "mov ass ";
+            cout_name();
+        }
         return *this;
     }
 
+    static void cout_name()
+    {
+        std::cout << "class_dummy<" << Def_C << ", " << Cpy_C << ", " << Cpy_A << ", " << Mov_C
+                  << ", " << Mov_A << ">\n";
+    }
+
 private:
-    int m_data = 0;
+    int                m_data       = 0;
 };
+
+void enable_printing(bool enable = true)
+{
+    should_print = enable;
+}
 
 /**
  * @brief tuple of dummy classes with default constructor, int constructor and

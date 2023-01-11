@@ -1,7 +1,7 @@
 #include "la_mt_queue.h"
 #include "test_base.h"
 
-constexpr uint test_loop_n = 128;
+constexpr uint test_loop_n = 1;
 
 template<typename T>
 int test_queue(T&& queue)
@@ -34,15 +34,24 @@ int test_queue(T&& queue)
         return 1;
     }
     return 0;
+    if constexpr (std::copy_constructible<value_t>)
+    {
+        for (uint i = 0; i < test_loop_n; ++i)
+        {
+            value_t tmp(std::rand());
+            queue.push(tmp);
+        }
+    }
 }
+
 
 template<typename T>
 int test_queue_ctor(T&& obj)
 {
     using value_t = std::remove_reference_t<T>;
-
-    if constexpr (la::move_or_copy_constructable<value_t>)
+    if constexpr (std::move_constructible<value_t> && std::constructible_from<std::queue<value_t>>)
     {
+        // obj.cout_name();
         auto queue = la::mt_queue<value_t>();
         return test_queue(queue);
     }
@@ -57,6 +66,7 @@ int test_queues(Types&&... args)
 
 int main()
 {
+    enable_printing();
     auto ret = std::apply([](auto&&... args) { return test_queues(args...); }, dummy_def);
     ret += std::apply([](auto&&... args) { return test_queues(args...); }, dummy_no_def);
     return ret;

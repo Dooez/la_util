@@ -1,14 +1,12 @@
 #ifndef LA_MT_QUEUE_H
 #define LA_MT_QUEUE_H
 
+#include <iostream>
 #include <mutex>
 #include <optional>
 #include <queue>
 
 namespace la {
-template<typename T>
-concept move_or_copy_constructable =
-    std::is_move_constructible_v<T> || std::is_copy_constructible_v<T>;
 
 /**
  * @brief Thread-safe queue.
@@ -16,7 +14,7 @@ concept move_or_copy_constructable =
  * @tparam T
  */
 template<typename T>
-    requires move_or_copy_constructable<T>
+    requires std::constructible_from<std::queue<T>> && std::move_constructible<T>
 class mt_queue
 {
 public:
@@ -48,7 +46,6 @@ public:
      * @return std::optional<T>
      */
     [[nodiscard]] auto pop() -> std::optional<T>
-        requires std::is_move_constructible_v<T>
     {
         std::scoped_lock<std::mutex> lock(queue_mutex);
         if (m_unsafe_queue.empty())
@@ -61,29 +58,12 @@ public:
     }
 
     /**
-     * @brief If queue contains elements removes an element from the front of the queue
-     * and returns optional containing removed element; If queue is empty returns empty optional;
-     *
-     * @return std::optional<T>
-     */
-    [[nodiscard]] auto pop() -> std::optional<T>
-    {
-        std::scoped_lock<std::mutex> lock(queue_mutex);
-        if (m_unsafe_queue.empty())
-        {
-            return {};
-        }
-        std::optional<T> tmp = m_unsafe_queue.front();
-        m_unsafe_queue.pop();
-        return tmp;
-    }
-
-    /**
      * @brief Inserts the given element into the back of the queue;
      *
      * @param item
      */
     void push(const T& item)
+        requires std::is_copy_constructible_v<T>
     {
         std::scoped_lock<std::mutex> lock(queue_mutex);
         m_unsafe_queue.push(item);
@@ -94,7 +74,6 @@ public:
      * @param item
      */
     void push(T&& item)
-        requires std::is_move_constructible_v<T>
     {
         std::scoped_lock<std::mutex> lock(queue_mutex);
         m_unsafe_queue.push(std::forward<T>(item));
