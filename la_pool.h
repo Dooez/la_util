@@ -57,7 +57,7 @@ public:
     template<typename F, typename D>
         requires std::constructible_from<std::function<T*()>, F> &&
                      std::constructible_from<std::function<void(T*)>, D>
-    explicit pool(F&& factory, D&& deleter)
+    pool(F&& factory, D&& deleter)
     : m_factory(std::forward<F>(factory))
     , m_deleter(std::forward<D>(deleter)){};
 
@@ -233,7 +233,7 @@ public:
         }
         return {};
     }
-    // NOLINTBEGIN(google-explicit-constructor, hicpp-explicit-conversions)
+    //NOLINTBEGIN(google-explicit-constructor, hicpp-explicit-conversions)
     /**
      * @brief Returns true if pooled_ptr manages an object.
      *
@@ -278,7 +278,7 @@ public:
      * @brief Releases managed object back into the parent pool. Manages no objects afterwards.
      *
      */
-    inline void release()
+    void release()
     {
         if (m_parent_pool != nullptr)
         {
