@@ -1,183 +1,65 @@
 #include "la_mt_queue.h"
+#include "test_base.h"
 
-#include <iostream>
-#include <typeinfo>
+constexpr uint test_loop_n = 128;
 
-class C_movconable
+template<typename T>
+int test_queue(T&& queue)
 {
-public:
-    C_movconable() = default;
-    explicit C_movconable(int input)
-    : m_data(input){};
-    ~C_movconable() = default;
+    using value_t = typename std::remove_reference_t<decltype(queue)>::value_type;
 
-    C_movconable(C_movconable&& other) noexcept
-    : m_data(other.m_data)
+    for (uint i = 0; i < test_loop_n; ++i)
     {
-        std::cout << "move constructed " << typeid(*this).name() << "\n";
-    };
-
-    C_movconable& operator=(C_movconable&& other)      = delete;
-    C_movconable(const C_movconable& other)            = delete;
-    C_movconable& operator=(const C_movconable& other) = delete;
-
-private:
-    int m_data = 0;
-};
-
-class C_movable
-{
-public:
-    C_movable() = default;
-    explicit C_movable(int input)
-    : m_data(input){};
-    ~C_movable() = default;
-
-    C_movable(C_movable&& other) noexcept
-    : m_data(other.m_data)
-    {
-        std::cout << "move constructed " << typeid(*this).name() << "\n";
-    };
-    C_movable& operator=(C_movable&& other) noexcept
-    {
-        m_data = other.m_data;
-        return *this;
+        queue.push(value_t(std::rand()));
     }
-
-    C_movable(const C_movable& other)            = delete;
-    C_movable& operator=(const C_movable& other) = delete;
-
-private:
-    int m_data = 0;
-};
-
-class C_copyconable
-{
-public:
-    C_copyconable() = default;
-    explicit C_copyconable(int input)
-    : m_data(input){};
-    ~C_copyconable() = default;
-
-    C_copyconable(const C_copyconable& other)
-    : m_data(other.m_data)
+    if (queue.size() != test_loop_n)
     {
-        std::cout << "copy constructed " << typeid(*this).name() << "\n";
-    };
-
-    C_copyconable& operator=(const C_copyconable& other) = delete;
-    C_copyconable(C_copyconable&& other)                 = delete;
-    C_copyconable& operator=(C_copyconable&& other)      = delete;
-
-private:
-    int m_data = 0;
-};
-
-class C_copyable
-{
-public:
-    C_copyable() = default;
-    explicit C_copyable(int input)
-    : m_data(input){};
-    ~C_copyable() = default;
-
-    C_copyable(const C_copyable& other)
-    : m_data(other.m_data)
-    {
-        std::cout << "copy constructed " << typeid(*this).name() << "\n";
-    };
-    C_copyable& operator=(const C_copyable& other)
-    {
-        m_data = other.m_data;
-        return *this;
+        return 1;
     }
-
-    C_copyable(C_copyable&& other)            = delete;
-    C_copyable& operator=(C_copyable&& other) = delete;
-
-private:
-    int m_data = 0;
-};
-
-class C_none
-{
-public:
-    C_none() = default;
-    explicit C_none(int input)
-    : m_data(input){};
-    ~C_none() = default;
-
-    C_none(const C_none& other)            = delete;
-    C_none(C_none&& other)                 = delete;
-    C_none& operator=(const C_none& other) = delete;
-    C_none& operator=(C_none&& other)      = delete;
-
-private:
-    int m_data = 0;
-};
-
-class C_copymov
-{
-public:
-    C_copymov() = default;
-    explicit C_copymov(int input)
-    : m_data(input){};
-    ~C_copymov() = default;
-
-    C_copymov(const C_copymov& other)
-    : m_data(other.m_data)
+    for (uint i = 0; i < test_loop_n; ++i)
     {
-        std::cout << "copy constructed " << typeid(*this).name() << "\n";
-    };
-    C_copymov(C_copymov&& other) noexcept
-    : m_data(other.m_data)
-    {
-        std::cout << "move constructed " << typeid(*this).name() << "\n";
-    };
-    C_copymov& operator=(const C_copymov& other)
-    {
-        m_data = other.m_data;
-        return *this;
+        auto v = queue.pop();
+        if (!v)
+        {
+            return 1;
+        }
     }
-
-    C_copymov& operator=(C_copymov&& other) noexcept
+    auto v = queue.pop();
+    if (v)
     {
-        m_data = other.m_data;
-        return *this;
+        return 1;
     }
+    if (queue.size() != 0)
+    {
+        return 1;
+    }
+    return 0;
+}
 
-private:
-    int m_data = 0;
-};
+template<typename T>
+int test_queue_ctor(T&& obj)
+{
+    using value_t = std::remove_reference_t<T>;
+
+    if constexpr (la::move_or_copy_constructable<value_t>)
+    {
+        auto queue = la::mt_queue<value_t>();
+        return test_queue(queue);
+    }
+    return 0;
+}
 
 template<typename... Types>
-void test_queues(Types&&... queues)
+int test_queues(Types&&... args)
 {
-    constexpr uint test_size = 2;
-    std::cout << "Pushing into queues\n";
-    for (uint i = 0; i < test_size; ++i)
-    {
-        (queues.push(typename std::remove_reference<decltype(queues)>::type::value_type(std::rand())),
-         ...);
-    }
-    std::cout << "Popping queues\n";
-    while ((static_cast<bool>(queues.pop()) || ...))
-    {
-    };
+    return (test_queue_ctor(args) + ...);
 }
 
 int main()
 {
-    la::mt_queue<C_copyconable> copycon_q{};
-    la::mt_queue<C_copyable>    copy_q{};
-    la::mt_queue<C_movconable>  movcon_q{};
-    la::mt_queue<C_movable>     mov_q{};
-    la::mt_queue<C_copymov>     normal_q{};
-    // la::mt_queue<C_none>        none_q{}; // Compilation error
+    auto ret = std::apply([](auto&&... args) { return test_queues(args...); }, dummy_def);
+    ret += std::apply([](auto&&... args) { return test_queues(args...); }, dummy_no_def);
+    return ret;
 
-    std::cout << "Testing queues\n";
-    test_queues(copycon_q, copy_q, movcon_q, mov_q, normal_q);
-    std::cout << "Testing queues - done\n";
-    
     return 0;
 }

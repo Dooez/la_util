@@ -64,7 +64,7 @@ using dummy_def_t = std::tuple<class_dummy<true, true, true, true, true>,
  * all combinations of copy and move constructors and assignments.
  *
  */
-using dummy_no_def_t     = std::tuple<class_dummy<false, true, true, true, true>,
+using dummy_no_def_t = std::tuple<class_dummy<false, true, true, true, true>,
                                   class_dummy<false, true, true, true, false>,
                                   class_dummy<false, true, true, false, true>,
                                   class_dummy<false, true, true, false, false>,
