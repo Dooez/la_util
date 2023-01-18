@@ -66,10 +66,9 @@ int test_queues(Types&&... args)
 
 int main()
 {
-    enable_printing();
-    auto ret = std::apply([](auto&&... args) { return test_queues(args...); }, dummy_def);
-    ret += std::apply([](auto&&... args) { return test_queues(args...); }, dummy_no_def);
+    test::enable_printing();
+    auto dummy = test::create_test_tuple<true, true, true, true, true>();
+    auto ret = std::apply([](auto&&... args) { return test_queues(args...); }, *dummy);
     return ret;
 
-    return 0;
 }

@@ -2,6 +2,7 @@
 #include "test_base.h"
 
 #include <iostream>
+#include <typeinfo>
 
 template<typename T>
 int test_pool(T&& pool)
@@ -81,7 +82,8 @@ int test_pools(Types&&... args)
 
 int main()
 {
-    auto ret = std::apply([](auto&&... args) { return test_pools(args...); }, dummy_def);
-    ret += std::apply([](auto&&... args) { return test_pools(args...); }, dummy_no_def);
+    auto dummy = test::create_test_tuple<true, true, true, true, true>();
+    auto ret = std::apply([](auto&&... args) { return test_pools(args...); }, *dummy);
+
     return ret;
 }
