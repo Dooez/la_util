@@ -3,6 +3,44 @@
 
 #include <iostream>
 #include <typeinfo>
+template<typename T, std::align_val_t Alignment = std::align_val_t{64}>
+class aligned_allocator
+{
+public:
+    using value_type      = T;
+    using is_always_equal = std::true_type;
+
+    aligned_allocator() = default;
+
+    template<typename U>
+    explicit aligned_allocator(const aligned_allocator<U, Alignment>&) noexcept {};
+
+    aligned_allocator(const aligned_allocator&)     = default;
+    aligned_allocator(aligned_allocator&&) noexcept = default;
+
+    ~aligned_allocator() = default;
+
+    aligned_allocator& operator=(const aligned_allocator&)     = default;
+    aligned_allocator& operator=(aligned_allocator&&) noexcept = default;
+
+    [[nodiscard]] auto allocate(std::size_t n) -> value_type*
+    {
+        return reinterpret_cast<value_type*>(::operator new[](n * sizeof(value_type), Alignment));
+    }
+
+    void deallocate(value_type* p, std::size_t)
+    {
+        ::operator delete[](reinterpret_cast<void*>(p), Alignment);
+    }
+
+    template<typename U>
+    struct rebind
+    {
+        using other = aligned_allocator<U, Alignment>;
+    };
+
+private:
+};
 
 template<typename T>
 int test_pool(T&& pool)
@@ -55,6 +93,13 @@ int test_pool_ctor(T&& object)
     {
         auto pool = la::pool<value_t>();
         ret += test_pool(pool);
+
+        auto al_pool = la::pool<value_t, aligned_allocator<value_t>>();
+        ret += test_pool(al_pool);
+
+        auto al_pool_al =
+            la::pool<value_t, aligned_allocator<value_t>>(aligned_allocator<value_t>{});
+        ret += test_pool(al_pool_al);
     }
     if constexpr (std::copy_constructible<value_t>)
     {
@@ -62,14 +107,22 @@ int test_pool_ctor(T&& object)
         auto pool = la::pool<value_t>(obj);
         ret += test_pool(pool);
 
+        auto al_pool_al =
+            la::pool<value_t, aligned_allocator<value_t>>(aligned_allocator<value_t>{}, obj);
+        ret += test_pool(al_pool_al);
+
+
         auto factory = [&obj]() { return new value_t(obj); };
         auto deleter = [](value_t* ptr) { delete ptr; };
 
-        auto pool_f = la::pool<value_t>(factory);
-        ret += test_pool(pool_f);
-
         auto pool_fd = la::pool<value_t>(factory, deleter);
         ret += test_pool(pool_fd);
+
+
+        auto al_pool_fd =
+            la::pool<value_t, aligned_allocator<value_t>>(factory,
+                                                          deleter,
+                                                          aligned_allocator<value_t>{});
     }
     return ret;
 }
@@ -83,7 +136,7 @@ int test_pools(Types&&... args)
 int main()
 {
     auto dummy = test::create_test_tuple<true, true, true, true, true>();
-    auto ret = std::apply([](auto&&... args) { return test_pools(args...); }, *dummy);
+    auto ret   = std::apply([](auto&&... args) { return test_pools(args...); }, *dummy);
 
     return ret;
 }

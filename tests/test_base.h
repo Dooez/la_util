@@ -4,6 +4,11 @@
 
 namespace test {
 
+namespace internal {
+
+    inline bool should_print = false;
+}
+
 template<bool Def_C, bool Cpy_C, bool Cpy_A, bool Mov_C, bool Mov_A>
 class class_dummy
 {
@@ -83,8 +88,6 @@ void enable_printing(bool enable = true)
 
 namespace internal {
 
-    inline bool should_print = false;
-    
     template<bool Def_C, bool Cpy_C, bool Cpy_A, bool Mov_C, bool Test_Mov_A, bool Mov_A = true>
     auto test_mov_a()
     {
