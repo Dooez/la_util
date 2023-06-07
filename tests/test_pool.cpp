@@ -2,6 +2,7 @@
 #include "test_base.h"
 
 #include <iostream>
+#include <type_traits>
 #include <typeinfo>
 template<typename T, std::align_val_t Alignment = std::align_val_t{64}>
 class aligned_allocator
@@ -45,6 +46,9 @@ private:
 template<typename T>
 int test_pool(T&& pool)
 {
+    using ptr_t = typename std::remove_cvref_t<T>::pointer;
+    ptr_t ptr{};
+
     auto acq0 = pool.acquire_free();
     if (acq0)
     {
@@ -80,6 +84,7 @@ int test_pool(T&& pool)
     {
         return 1;
     }
+    ptr = pool.acquire();
     return 0;
 }
 

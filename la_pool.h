@@ -14,7 +14,7 @@ class pooled_ptr;
 
 /**
  * @brief Pool of reusable objects.
- * When nececarry creates new objects using factory function. 
+ * When nececarry creates new objects using factory function.
  *
  * @tparam T
  * @tparam Allocator An allocator that is used for internal pointer lists and for new objects if not using custom factory and deleter.
@@ -26,10 +26,13 @@ class pool
 
     using list_allocator_type =
         typename std::allocator_traits<Allocator>::template rebind_alloc<T*>;
+    class pool_;
+    using pool_allocator_type_ =
+        typename std::allocator_traits<Allocator>::template rebind_alloc<pool_>;
 
 public:
     using value_type     = T;
-    using pooled_ptr     = pooled_ptr<T, Allocator>;
+    using pointer        = pooled_ptr<T, Allocator>;
     using allocator_type = Allocator;
 
     /**
@@ -40,33 +43,30 @@ public:
     template<typename... Args>
         requires std::constructible_from<T, Args...> && (std::copy_constructible<Args> && ...)
     explicit pool(Args&&... args)
-    : m_factory([&, ... args = std::forward<Args>(args)] {
-        auto* ptr = m_allocator.allocate(1);
-        return new (ptr) T(args...);
-    })
-    , m_deleter([&](T* ptr) {
-        ptr->~T();
-        m_allocator.deallocate(ptr, 1);
-    }){};
+    {
+        auto alloc  = pool_allocator_type_();
+        auto l_base = alloc.allocate(1);
+        auto drain  = pool_drain_(alloc);
+
+        m_pool = new (l_base) pool_(drain, std::forward<Args>(args)...);
+    };
 
     /**
      * @brief Construct a new pool object.
-     * 
+     *
      * @param args Arguments passed to operator new when creating new object.
-     * @param allocator 
+     * @param allocator
      */
     template<typename... Args>
         requires std::constructible_from<T, Args...> && (std::copy_constructible<Args> && ...)
     explicit pool(allocator_type allocator, Args&&... args)
-    : m_allocator(allocator)
-    , m_factory([&, ... args = std::forward<Args>(args)] {
-        auto* ptr = m_allocator.allocate(1);
-        return new (ptr) T(args...);
-    })
-    , m_deleter([&](T* ptr) {
-        ptr->~T();
-        m_allocator.deallocate(ptr, 1);
-    }){};
+    {
+        auto alloc  = static_cast<pool_allocator_type_>(allocator);
+        auto l_base = alloc.allocate(1);
+        auto drain  = pool_drain_(alloc);
+
+        m_pool = new (l_base) pool_(drain, allocator, std::forward<Args>(args)...);
+    };
 
     /**
      * @brief Construct a new pool object
@@ -76,15 +76,20 @@ public:
      */
     template<typename F, typename D>
         requires std::constructible_from<std::function<T*()>, F> &&
-                     std::constructible_from<std::function<void(T*)>, D>
+                 std::constructible_from<std::function<void(T*)>, D>
     pool(F&& factory, D&& deleter, allocator_type allocator = allocator_type{})
-    : m_allocator(allocator)
-    , m_factory(std::forward<F>(factory))
-    , m_deleter(std::forward<D>(deleter)){};
+    {
+        auto alloc  = static_cast<pool_allocator_type_>(allocator);
+        auto l_base = alloc.allocate(1);
+        auto drain  = pool_drain_(alloc);
+
+        m_pool = new (l_base)
+            pool_(drain, std::forward<F>(factory), std::forward<D>(deleter), allocator);
+    };
 
     ~pool()
     {
-        clear();
+        m_pool->abandon();
     }
 
     pool(pool&&)                 = delete;
@@ -99,13 +104,7 @@ public:
      */
     void populate(std::size_t insert_n)
     {
-        std::scoped_lock lock(pool_mutex);
-        for (std::size_t i = 0; i < insert_n; i++)
-        {
-            T* l_new_ptr = m_factory();
-            m_object_list.push_back(l_new_ptr);
-            m_free_list.push_back(l_new_ptr);
-        }
+        m_pool->populate(insert_n);
     }
 
     /**
@@ -113,34 +112,18 @@ public:
      *
      * @return pooled_ptr<T> Smart pointer to the object.
      */
-    [[nodiscard]] auto acquire() -> pooled_ptr
+    [[nodiscard]] auto acquire() -> pointer
     {
-        std::scoped_lock lock(pool_mutex);
-        if (!m_free_list.empty())
-        {
-            T* l_ptr = m_free_list.back();
-            m_free_list.pop_back();
-            return {this, l_ptr};
-        }
-        T* l_new_ptr = m_factory();
-        m_object_list.push_back(l_new_ptr);
-        return {this, l_new_ptr};
+        return m_pool->acquire();
     };
     /**
      * @brief Attempts to acquire a free object from pool. If no free objects are available returns empty pooled_ptr.
      *
      * @return pooled_ptr<T> Smart pointer to the object. Empty if no free objects are available.
      */
-    [[nodiscard]] auto acquire_free() -> pooled_ptr
+    [[nodiscard]] auto acquire_free() -> pointer
     {
-        std::scoped_lock lock(pool_mutex);
-        if (!m_free_list.empty())
-        {
-            T* l_ptr = m_free_list.back();
-            m_free_list.pop_back();
-            return {this, l_ptr};
-        }
-        return {};
+        return m_pool->acquire_free();
     };
 
     /**
@@ -150,8 +133,7 @@ public:
      */
     [[nodiscard]] inline std::size_t size() const
     {
-        std::scoped_lock lock(pool_mutex);
-        return m_object_list.size();
+        return m_pool->size();
     }
     /**
      * @brief
@@ -160,37 +142,170 @@ public:
      */
     [[nodiscard]] inline std::size_t free_size() const
     {
-        std::scoped_lock lock(pool_mutex);
-        return m_free_list.size();
-    }
-
-    void clear()
-    {
-        std::scoped_lock lock(pool_mutex);
-        for (auto* i_object_ptr : m_object_list)
-        {
-            m_deleter(i_object_ptr);
-        }
-        m_object_list.clear();
-        m_free_list.clear();
+        return m_pool->free_size();
     }
 
 private:
-    void release(T* object_ptr)
+    class pool_drain_
     {
-        std::scoped_lock lock(pool_mutex);
-        m_free_list.push_back(object_ptr);
+    public:
+        explicit pool_drain_(pool_allocator_type_ allocator = pool_allocator_type_{})
+        : m_allocator(allocator){};
+
+        void operator()(pool_* ptr)
+        {
+            ptr->~pool_();
+            m_allocator.deallocate(ptr, 1);
+        };
+
+        [[no_unique_address]] pool_allocator_type_ m_allocator;
     };
 
-    [[no_unique_address]] allocator_type m_allocator{};
+    class pool_
+    {
+    public:
+        pool_(pool_&&)                 = delete;
+        pool_(const pool_&)            = delete;
+        pool_& operator=(pool_&&)      = delete;
+        pool_& operator=(const pool_&) = delete;
 
-    std::list<T*, list_allocator_type> m_object_list{static_cast<list_allocator_type>(m_allocator)};
-    std::list<T*, list_allocator_type> m_free_list{static_cast<list_allocator_type>(m_allocator)};
+        ~pool_() = default;
 
-    const std::function<T*()>     m_factory;
-    const std::function<void(T*)> m_deleter;
+        template<typename... Args>
+            requires std::constructible_from<T, Args...> && (std::copy_constructible<Args> && ...)
+        explicit pool_(pool_drain_ drain, Args&&... args)
+        : m_drain(drain)
+        , m_factory([&, ... args = std::forward<Args>(args)] {
+            auto* ptr = m_allocator.allocate(1);
+            return new (ptr) T(args...);
+        })
+        , m_deleter([&](T* ptr) {
+            ptr->~T();
+            m_allocator.deallocate(ptr, 1);
+        }){};
 
-    mutable std::mutex pool_mutex;
+        template<typename... Args>
+            requires std::constructible_from<T, Args...> && (std::copy_constructible<Args> && ...)
+        explicit pool_(pool_drain_ drain, allocator_type allocator, Args&&... args)
+        : m_drain(drain)
+        , m_allocator(allocator)
+        , m_factory([&, ... args = std::forward<Args>(args)] {
+            auto* ptr = m_allocator.allocate(1);
+            return new (ptr) T(args...);
+        })
+        , m_deleter([&](T* ptr) {
+            ptr->~T();
+            m_allocator.deallocate(ptr, 1);
+        }){};
+
+        template<typename F, typename D>
+            requires std::constructible_from<std::function<T*()>, F> &&
+                         std::constructible_from<std::function<void(T*)>, D>
+        pool_(pool_drain_    drain,
+              F&&            factory,
+              D&&            deleter,
+              allocator_type allocator = allocator_type{})
+        : m_drain(drain)
+        , m_allocator(allocator)
+        , m_factory(std::forward<F>(factory))
+        , m_deleter(std::forward<D>(deleter)){};
+
+
+        [[nodiscard]] auto acquire() -> pointer
+        {
+            std::scoped_lock lock(pool_mutex);
+            if (!m_free_list.empty())
+            {
+                T* l_ptr = m_free_list.back();
+                m_free_list.pop_back();
+                return {this, l_ptr};
+            }
+            T* l_new_ptr = m_factory();
+            m_object_list.push_back(l_new_ptr);
+            return {this, l_new_ptr};
+        };
+
+        [[nodiscard]] auto acquire_free() -> pointer
+        {
+            std::scoped_lock lock(pool_mutex);
+            if (!m_free_list.empty())
+            {
+                T* l_ptr = m_free_list.back();
+                m_free_list.pop_back();
+                return {this, l_ptr};
+            }
+            return {};
+        };
+
+        void populate(std::size_t insert_n)
+        {
+            std::scoped_lock lock(pool_mutex);
+            for (std::size_t i = 0; i < insert_n; i++)
+            {
+                T* l_new_ptr = m_factory();
+                m_object_list.push_back(l_new_ptr);
+                m_free_list.push_back(l_new_ptr);
+            }
+        }
+
+        [[nodiscard]] inline std::size_t size() const
+        {
+            std::scoped_lock lock(pool_mutex);
+            return m_object_list.size();
+        }
+
+        [[nodiscard]] inline std::size_t free_size() const
+        {
+            std::scoped_lock lock(pool_mutex);
+            return m_free_list.size();
+        }
+
+        void release(T* object_ptr)
+        {
+            std::scoped_lock lock(pool_mutex);
+            m_free_list.push_back(object_ptr);
+            if (m_abandoned)
+            {
+                m_deleter(object_ptr);
+                if (m_free_list.size() == m_object_list.size())
+                {
+                    auto drain = m_drain;
+                    drain(this);
+                }
+            }
+        };
+
+        void abandon()
+        {
+            std::scoped_lock lock(pool_mutex);
+            m_abandoned = true;
+            for (auto* i_object_ptr : m_free_list)
+            {
+                m_deleter(i_object_ptr);
+            }
+            if (m_free_list.size() == m_object_list.size())
+            {
+                auto drain = m_drain;
+                drain(this);
+            }
+        }
+
+    private:
+        [[no_unique_address]] allocator_type m_allocator{};
+        [[no_unique_address]] pool_drain_    m_drain;
+
+        std::list<T*, list_allocator_type> m_object_list;
+        std::list<T*, list_allocator_type> m_free_list;
+
+        const std::function<T*()>     m_factory;
+        const std::function<void(T*)> m_deleter;
+
+        bool m_abandoned = false;
+
+        mutable std::mutex pool_mutex;
+    };
+
+    pool_* m_pool;
 };
 
 /**
@@ -312,12 +427,14 @@ public:
     }
 
 private:
-    pooled_ptr(pool<T, Allocator>* parent_pool, T* object_ptr)
+    using pool_t = typename pool<T, Allocator>::pool_;
+
+    pooled_ptr(pool_t* parent_pool, T* object_ptr)
     : m_parent_pool(parent_pool)
     , m_data(object_ptr){};
 
-    pool<T, Allocator>* m_parent_pool = nullptr;
-    T*                  m_data        = nullptr;
+    pool_t* m_parent_pool = nullptr;
+    T*      m_data        = nullptr;
 };
 };    // namespace la
 
