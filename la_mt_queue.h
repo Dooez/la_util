@@ -15,8 +15,7 @@ namespace la {
  */
 template<typename T>
     requires std::constructible_from<std::queue<T>> && std::move_constructible<T>
-class mt_queue
-{
+class mt_queue {
 public:
     using value_type = T;
 
@@ -33,8 +32,7 @@ public:
      *
      * @return std::size_t
      */
-    [[nodiscard]] std::size_t size() const
-    {
+    [[nodiscard]] std::size_t size() const {
         std::scoped_lock lock(queue_mutex);
         return m_unsafe_queue.size();
     }
@@ -45,11 +43,9 @@ public:
      *
      * @return std::optional<T>
      */
-    [[nodiscard]] auto pop() -> std::optional<T>
-    {
+    [[nodiscard]] auto pop() -> std::optional<T> {
         std::scoped_lock<std::mutex> lock(queue_mutex);
-        if (m_unsafe_queue.empty())
-        {
+        if (m_unsafe_queue.empty()) {
             return {};
         }
         std::optional<T> tmp = std::move(m_unsafe_queue.front());
@@ -73,8 +69,7 @@ public:
      *
      * @param item
      */
-    void push(T&& item)
-    {
+    void push(T&& item) {
         std::scoped_lock<std::mutex> lock(queue_mutex);
         m_unsafe_queue.push(std::forward<T>(item));
     }

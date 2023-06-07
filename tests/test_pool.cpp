@@ -5,8 +5,7 @@
 #include <type_traits>
 #include <typeinfo>
 template<typename T, std::align_val_t Alignment = std::align_val_t{64}>
-class aligned_allocator
-{
+class aligned_allocator {
 public:
     using value_type      = T;
     using is_always_equal = std::true_type;
@@ -24,19 +23,16 @@ public:
     aligned_allocator& operator=(const aligned_allocator&)     = default;
     aligned_allocator& operator=(aligned_allocator&&) noexcept = default;
 
-    [[nodiscard]] auto allocate(std::size_t n) -> value_type*
-    {
+    [[nodiscard]] auto allocate(std::size_t n) -> value_type* {
         return reinterpret_cast<value_type*>(::operator new[](n * sizeof(value_type), Alignment));
     }
 
-    void deallocate(value_type* p, std::size_t)
-    {
+    void deallocate(value_type* p, std::size_t) {
         ::operator delete[](reinterpret_cast<void*>(p), Alignment);
     }
 
     template<typename U>
-    struct rebind
-    {
+    struct rebind {
         using other = aligned_allocator<U, Alignment>;
     };
 
@@ -44,44 +40,36 @@ private:
 };
 
 template<typename T>
-int test_pool(T&& pool)
-{
+int test_pool(T&& pool) {
     using ptr_t = typename std::remove_cvref_t<T>::pointer;
     ptr_t ptr{};
 
     auto acq0 = pool.acquire_free();
-    if (acq0)
-    {
+    if (acq0) {
         return 1;
     }
     auto acq1 = pool.acquire();
-    if (!acq1)
-    {
+    if (!acq1) {
         return 1;
     }
     acq0 = pool.acquire_free();
-    if (acq0)
-    {
+    if (acq0) {
         return 1;
     }
     acq1.release();
-    if (acq1)
-    {
+    if (acq1) {
         return 1;
     }
     acq0 = pool.acquire_free();
-    if (!acq0)
-    {
+    if (!acq0) {
         return 1;
     }
     pool.populate(1);
-    if (pool.size() != 2 || pool.free_size() != 1)
-    {
+    if (pool.size() != 2 || pool.free_size() != 1) {
         return 1;
     }
     auto sh_ptr = static_cast<std::shared_ptr<typename decltype(acq0)::element_type>>(acq0);
-    if (acq0)
-    {
+    if (acq0) {
         return 1;
     }
     ptr = pool.acquire();
@@ -89,31 +77,26 @@ int test_pool(T&& pool)
 }
 
 template<typename T>
-int test_pool_ctor(T&& object)
-{
+int test_pool_ctor(T&& object) {
     using value_t = std::remove_reference_t<T>;
 
     int ret = 0;
-    if constexpr (std::constructible_from<value_t>)
-    {
+    if constexpr (std::constructible_from<value_t>) {
         auto pool = la::pool<value_t>();
         ret += test_pool(pool);
 
         auto al_pool = la::pool<value_t, aligned_allocator<value_t>>();
         ret += test_pool(al_pool);
 
-        auto al_pool_al =
-            la::pool<value_t, aligned_allocator<value_t>>(aligned_allocator<value_t>{});
+        auto al_pool_al = la::pool<value_t, aligned_allocator<value_t>>(aligned_allocator<value_t>{});
         ret += test_pool(al_pool_al);
     }
-    if constexpr (std::copy_constructible<value_t>)
-    {
+    if constexpr (std::copy_constructible<value_t>) {
         auto obj  = value_t(0);
         auto pool = la::pool<value_t>(obj);
         ret += test_pool(pool);
 
-        auto al_pool_al =
-            la::pool<value_t, aligned_allocator<value_t>>(aligned_allocator<value_t>{}, obj);
+        auto al_pool_al = la::pool<value_t, aligned_allocator<value_t>>(aligned_allocator<value_t>{}, obj);
         ret += test_pool(al_pool_al);
 
 
@@ -125,21 +108,17 @@ int test_pool_ctor(T&& object)
 
 
         auto al_pool_fd =
-            la::pool<value_t, aligned_allocator<value_t>>(factory,
-                                                          deleter,
-                                                          aligned_allocator<value_t>{});
+            la::pool<value_t, aligned_allocator<value_t>>(factory, deleter, aligned_allocator<value_t>{});
     }
     return ret;
 }
 
 template<typename... Types>
-int test_pools(Types&&... args)
-{
+int test_pools(Types&&... args) {
     return (test_pool_ctor(args) + ...);
 }
 
-int main()
-{
+int main() {
     auto dummy = test::create_test_tuple<true, true, true, true, true>();
     auto ret   = std::apply([](auto&&... args) { return test_pools(args...); }, *dummy);
 
