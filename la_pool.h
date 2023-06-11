@@ -31,8 +31,8 @@ class pool {
 
 public:
     using value_type     = T;
-    using pointer        = pooled_ptr<T, Allocator>;
     using allocator_type = Allocator;
+    using pointer        = pooled_ptr<value_type, allocator_type>;
 
     /**
      * @brief Construct a new pool object.
@@ -162,7 +162,7 @@ public:
 
 private:
     class pool_ {
-        using list_allocator_t = typename std::allocator_traits<Allocator>::template rebind_alloc<T*>;
+        using list_allocator_t = typename std::allocator_traits<allocator_type>::template rebind_alloc<T*>;
 
     public:
         pool_(pool_&&)                 = delete;
@@ -352,7 +352,7 @@ public:
         }
         return {};
     }
-    //NOLINTBEGIN(google-explicit-constructor, hicpp-explicit-conversions)
+    //NOLINTBEGIN(*explicit*)
     /**
      * @brief Returns true if pooled_ptr manages an object.
      *
@@ -362,7 +362,7 @@ public:
     operator bool() const noexcept {
         return (m_pool_ptr != nullptr);
     }
-    //NOLINTEND(google-explicit-constructor, hicpp-explicit-conversions)
+    //NOLINTEND(*explicit*)
 
     /**
      * @brief Returns a pointer to the managed object.
@@ -402,14 +402,14 @@ public:
     }
 
 private:
-    using pool_t = typename pool<T, Allocator>::pool_;
+    using pool_t = typename pool<element_type, Allocator>::pool_;
 
-    pooled_ptr(pool_t* parent_pool, T* object_ptr)
+    pooled_ptr(pool_t* parent_pool, pointer object_ptr)
     : m_pool_ptr(parent_pool)
     , m_data(object_ptr){};
 
     pool_t* m_pool_ptr = nullptr;
-    T*      m_data     = nullptr;
+    pointer m_data     = nullptr;
 };
 };    // namespace la
 
