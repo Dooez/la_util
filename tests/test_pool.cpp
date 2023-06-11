@@ -41,7 +41,8 @@ private:
 
 template<typename T>
 int test_pool(T&& pool) {
-    using ptr_t = typename std::remove_cvref_t<T>::pointer;
+    using pool_t = std::remove_cvref_t<T>;
+    using ptr_t  = typename pool_t::pointer;
     ptr_t ptr{};
 
     auto acq0 = pool.acquire_free();
@@ -72,7 +73,16 @@ int test_pool(T&& pool) {
     if (acq0) {
         return 1;
     }
-    ptr = pool.acquire();
+    if constexpr (std::copy_constructible<pool_t>) {
+        auto pool_cpy = pool_t(pool);
+
+        ptr       = pool_cpy.acquire();
+        auto acq1 = pool.acquire();
+
+    } else {
+        ptr = pool.acquire();
+    }
+    acq0 = pool.acquire();
     return 0;
 }
 
