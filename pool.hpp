@@ -23,6 +23,16 @@ template<typename T, typename Allocator, typename F>
     requires factory_of<T, F>
 class pool_ctrl_block_;
 
+/**
+ * @brief Manages a ring buffer of pointers to elements. Maximum size is capacity - 1.
+ * When inserting ecactly 1 element causes size to be equal to capacity, capacity is doubled.
+ * Otherwise capacity is increased by the number of inserted elements.
+ * Allocation, construction and deallocation of data are managed by the derived class.
+ * Control block should be allocated on heap.
+ * After calling abandon() control block waits for all managed elements to be returned and calls destroy().
+ *
+ * @tparam T
+ */
 template<typename T>
 class pool_ctrl_block {
 public:
@@ -31,13 +41,18 @@ public:
 
     pool_ctrl_block() = default;
 
-
     pool_ctrl_block(const pool_ctrl_block& other)                = delete;
     pool_ctrl_block(pool_ctrl_block&& other) noexcept            = delete;
     pool_ctrl_block& operator=(const pool_ctrl_block& other)     = delete;
     pool_ctrl_block& operator=(pool_ctrl_block&& other) noexcept = delete;
 
     virtual ~pool_ctrl_block() = default;
+
+    void populate(std::size_t insert_n) {
+        std::scoped_lock lock_h(head_pool_mutex);
+        std::scoped_lock lock_t(tail_pool_mutex);
+        insert_no_mutex(insert_n);
+    }
 
     [[nodiscard]] auto acquire() -> pointer {
         std::scoped_lock lock_t(tail_pool_mutex);
@@ -62,27 +77,6 @@ public:
         }
         return {};
     };
-
-    inline void populate(std::size_t insert_n) {
-        std::scoped_lock lock_h(head_pool_mutex);
-        std::scoped_lock lock_t(tail_pool_mutex);
-        insert_no_mutex(insert_n);
-    }
-
-    [[nodiscard]] auto size() const -> std::size_t {
-        return m_size;
-    }
-
-    [[nodiscard]] auto free_size() const -> std::size_t {
-        if (m_head_idx > m_tail_idx) {
-            return m_head_idx - m_tail_idx;
-        }
-        if (m_head_idx < m_tail_idx) {
-            auto len_tail = m_capacity - m_tail_idx;
-            return m_head_idx + len_tail;
-        }
-        return 0;
-    }
 
     void release(T* object_ptr) {
         std::scoped_lock lock_h(head_pool_mutex);
@@ -111,13 +105,22 @@ public:
             destroy();
     }
 
+    [[nodiscard]] auto size() const -> std::size_t {
+        return m_size;
+    }
+
+    [[nodiscard]] auto free_size() const -> std::size_t {
+        if (m_head_idx > m_tail_idx) {
+            return m_head_idx - m_tail_idx;
+        }
+        if (m_head_idx < m_tail_idx) {
+            auto len_tail = m_capacity - m_tail_idx;
+            return m_head_idx + len_tail;
+        }
+        return 0;
+    }
+
 private:
-    [[nodiscard]] virtual auto allocate_buffer(std::size_t) -> T** = 0;
-
-    virtual void deallocate_buffer(T**, std::size_t) = 0;
-
-    virtual void destroy() = 0;
-
     std::size_t m_head_idx = 0;
     std::size_t m_tail_idx = 0;
 
@@ -129,11 +132,14 @@ private:
 
     bool m_abandoned = false;
 
-    mutable std::mutex tail_pool_mutex;
-    mutable std::mutex head_pool_mutex;
+    std::mutex tail_pool_mutex;
+    std::mutex head_pool_mutex;
 
-    virtual auto new_val() -> T*    = 0;
-    virtual void delete_val(T* ptr) = 0;
+    [[nodiscard]] virtual auto new_val() -> T*                     = 0;
+    virtual void               delete_val(T* ptr)                  = 0;
+    [[nodiscard]] virtual auto allocate_buffer(std::size_t) -> T** = 0;
+    virtual void               deallocate_buffer(T**, std::size_t) = 0;
+    virtual void               destroy()                           = 0;
 
     auto insert_no_mutex(std::size_t insert_n) -> T* {
         if (m_size + insert_n >= m_capacity) {
@@ -165,6 +171,15 @@ private:
     }
 };
 
+/**
+ * @brief This class manages allocation and deallocation of data in pool.
+ * Holds a copy of its own allocator. When destroy() is called,
+ * uses the copy of allocator to self-destruct and deallocate.
+ *
+ * @tparam T
+ * @tparam Allocator
+ * @tparam F
+ */
 template<typename T, typename Allocator, typename F>
     requires factory_of<T, F>
 class pool_ctrl_block_ final : public pool_ctrl_block<T> {
@@ -178,8 +193,8 @@ public:
 
     pool_ctrl_block_() = delete;
 
-    pool_ctrl_block_(ctrl_block_alloc_t core_allocator, Allocator allocator, F factory)
-    : m_this_allocator(std::move(core_allocator))
+    pool_ctrl_block_(ctrl_block_alloc_t this_allocator, Allocator allocator, F factory)
+    : m_this_allocator(std::move(this_allocator))
     , m_allocator(std::move(allocator))
     , m_buffer_allocator(static_cast<buffer_alloc_t>(m_allocator))
     , m_factory(factory){};
@@ -221,7 +236,6 @@ private:
     F m_factory;
 };
 
-
 template<typename T, typename Allocator, typename... Args>
 static auto allocate_ctrl_block(Allocator allocator, Args&&... args) {
     auto factory = [... args = std::forward<Args>(args)](T* placement_ptr) {
@@ -252,11 +266,11 @@ static auto allocate_ctrl_block(Allocator allocator, F&& factory) {
 
 /**
  * @brief Pool of reusable objects.
- * When necessary creates new objects using factory function.
- * Uses heap allocated internal pool that persists until the last object is returned.
+ * When necessary creates new elements using provided or generated factory.
+ * Uses heap allocated internal control block that persists until the last element is returned.
  *
  * @tparam T
- * @tparam Shared  if true enables copy construction and assignment.
+ * @tparam Shared if true enables copy construction and assignment.
  */
 template<class T, bool Shared = false>
 class pool {
@@ -272,7 +286,7 @@ public:
     /**
      * @brief Construct a new pool object.
      *
-     * @param allocator allocator used for allcation of internal control block and data elements.
+     * @param allocator allocator used for allocation of internal control block and data elements.
      * @param args arguments passed to operator new when creating data elements.
      */
     template<typename Allocator, typename... Args>
@@ -289,7 +303,7 @@ public:
     /**
      * @brief Construct a new pool object.
      *
-     * @param args arguments passed to operator new when creating new object.
+     * @param args arguments passed to operator new when creating data elements.
      */
     template<typename... Args>
         requires std::constructible_from<T, Args...> && (std::copy_constructible<Args> && ...)
@@ -464,8 +478,8 @@ public:
     /**
      * @brief Returns true if pooled_ptr manages an object.
      *
-     * @return true Manages object.
-     * @return false Manages no object.
+     * @return true manages object.
+     * @return false manages no object.
      */
     operator bool() const noexcept {    //NOLINT(*explicit*)
         return (m_pool_ptr != nullptr);
