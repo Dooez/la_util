@@ -135,14 +135,13 @@ int test_pool_ctor(T&& object) {
         ret += test_pool(al_pool_al);
 
 
-        auto factory = [&obj]() { return new value_t(obj); };
-        auto deleter = [](value_t* ptr) { delete ptr; };
+        auto factory = [&obj](value_t* ptr) { return new (ptr) value_t(obj); };
 
-        auto pool_fd = mtmu::pool<value_t>(factory, deleter);
+        auto pool_fd = mtmu::pool<value_t>(factory);
         ret += test_pool(pool_fd);
 
 
-        auto al_pool_fd = mtmu::pool<value_t>(factory, deleter, aligned_allocator<value_t>{});
+        auto al_pool_fd = mtmu::pool<value_t>(factory, aligned_allocator<value_t>{});
     }
     return ret;
 }
