@@ -11,8 +11,6 @@ template<class T>
 class pooled_ptr;
 
 namespace detail_ {
-template<typename T>
-class pool_;
 
 template<typename T, typename F>
 concept factory_of = requires(F&& factory, T* placement_ptr) {
