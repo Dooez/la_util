@@ -53,8 +53,8 @@ int test_queues(Types&&... args) {
 }
 
 int main() {
-    test::enable_printing();
-    auto dummy = test::create_test_tuple<true, true, true, true, true>();
+    // test::enable_printing();
+    auto dummy = test::create_test_tuple<test::member_selector{}>();
     auto ret   = std::apply([](auto&&... args) { return test_queues(args...); }, *dummy);
     return ret;
 }

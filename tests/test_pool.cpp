@@ -1,4 +1,4 @@
-#include "la_pool.h"
+#include "pool.hpp"
 #include "test_base.h"
 
 #include <iostream>
@@ -47,30 +47,44 @@ int test_pool(T&& pool) {
 
     auto acq0 = pool.acquire_free();
     if (acq0) {
+        pool_t::value_type::cout_name();
+        std::cout << 1;
         return 1;
     }
     auto acq1 = pool.acquire();
     if (!acq1) {
+        pool_t::value_type::cout_name();
+        std::cout << 2;
         return 1;
     }
     acq0 = pool.acquire_free();
     if (acq0) {
+        pool_t::value_type::cout_name();
+        std::cout << 3;
         return 1;
     }
     acq1.release();
     if (acq1) {
+        pool_t::value_type::cout_name();
+        std::cout << 4;
         return 1;
     }
     acq0 = pool.acquire_free();
     if (!acq0) {
+        pool_t::value_type::cout_name();
+        std::cout << 5;
         return 1;
     }
     pool.populate(1);
     if (pool.size() != 2 || pool.free_size() != 1) {
+        pool_t::value_type::cout_name();
+        std::cout << 6;
         return 1;
     }
     auto sh_ptr = static_cast<std::shared_ptr<typename decltype(acq0)::element_type>>(acq0);
     if (acq0) {
+        pool_t::value_type::cout_name();
+        std::cout << 7;
         return 1;
     }
     if constexpr (std::copy_constructible<pool_t>) {
@@ -92,33 +106,29 @@ int test_pool_ctor(T&& object) {
 
     int ret = 0;
     if constexpr (std::constructible_from<value_t>) {
-        auto pool = la::pool<value_t>();
+        auto pool = mtmu::pool<value_t>();
         ret += test_pool(pool);
 
-        auto al_pool = la::pool<value_t, aligned_allocator<value_t>>();
+        auto al_pool = mtmu::pool<value_t>();
         ret += test_pool(al_pool);
-
-        auto al_pool_al = la::pool<value_t, aligned_allocator<value_t>>(aligned_allocator<value_t>{});
-        ret += test_pool(al_pool_al);
     }
     if constexpr (std::copy_constructible<value_t>) {
         auto obj  = value_t(0);
-        auto pool = la::pool<value_t>(obj);
+        auto pool = mtmu::pool<value_t>(obj);
         ret += test_pool(pool);
 
-        auto al_pool_al = la::pool<value_t, aligned_allocator<value_t>>(aligned_allocator<value_t>{}, obj);
+        auto al_pool_al = mtmu::pool<value_t>(obj);
         ret += test_pool(al_pool_al);
 
 
         auto factory = [&obj]() { return new value_t(obj); };
         auto deleter = [](value_t* ptr) { delete ptr; };
 
-        auto pool_fd = la::pool<value_t>(factory, deleter);
+        auto pool_fd = mtmu::pool<value_t>(factory, deleter);
         ret += test_pool(pool_fd);
 
 
-        auto al_pool_fd =
-            la::pool<value_t, aligned_allocator<value_t>>(factory, deleter, aligned_allocator<value_t>{});
+        auto al_pool_fd = mtmu::pool<value_t>(factory, deleter, aligned_allocator<value_t>{});
     }
     return ret;
 }
@@ -129,7 +139,7 @@ int test_pools(Types&&... args) {
 }
 
 int main() {
-    auto dummy = test::create_test_tuple<true, true, true, true, true>();
+    auto dummy = test::create_test_tuple<test::member_selector{}>();
     auto ret   = std::apply([](auto&&... args) { return test_pools(args...); }, *dummy);
 
     return ret;
