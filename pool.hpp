@@ -158,7 +158,7 @@ public:
     [[nodiscard]] auto acquire() -> pointer {
         std::scoped_lock lock_t(tail_pool_mutex);
         if (m_head_idx != m_tail_idx) {
-            auto data  = m_data[m_tail_idx];
+            auto* data = m_data[m_tail_idx];
             m_tail_idx = (m_tail_idx + 1) % m_capacity;
             return {this, data};
         }
@@ -263,8 +263,8 @@ private:
 
             m_data     = tmp_buf;
             m_capacity = new_capacity;
-            m_tail_idx = 0;
             m_head_idx = free_size();
+            m_tail_idx = 0;
         }
         auto old_head = m_head_idx;
         for (uint i = 0; i < insert_n; ++i) {

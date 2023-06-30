@@ -48,43 +48,36 @@ int test_pool(T&& pool) {
     auto acq0 = pool.acquire_free();
     if (acq0) {
         pool_t::value_type::cout_name();
-        std::cout << 1;
         return 1;
     }
     auto acq1 = pool.acquire();
     if (!acq1) {
         pool_t::value_type::cout_name();
-        std::cout << 2;
         return 1;
     }
     acq0 = pool.acquire_free();
     if (acq0) {
         pool_t::value_type::cout_name();
-        std::cout << 3;
         return 1;
     }
     acq1.release();
     if (acq1) {
         pool_t::value_type::cout_name();
-        std::cout << 4;
         return 1;
     }
     acq0 = pool.acquire_free();
     if (!acq0) {
         pool_t::value_type::cout_name();
-        std::cout << 5;
         return 1;
     }
     pool.populate(1);
     if (pool.size() != 2 || pool.free_size() != 1) {
         pool_t::value_type::cout_name();
-        std::cout << 6;
         return 1;
     }
     auto sh_ptr = static_cast<std::shared_ptr<typename decltype(acq0)::element_type>>(acq0);
     if (acq0) {
         pool_t::value_type::cout_name();
-        std::cout << 7;
         return 1;
     }
     if constexpr (std::copy_constructible<pool_t>) {
@@ -95,6 +88,27 @@ int test_pool(T&& pool) {
 
     } else {
         ptr = pool.acquire();
+    }
+    auto sz  = pool.size();
+    auto szf = pool.free_size();
+    {
+        std::array<typename pool_t::pointer, 137> pointers{};
+        for (uint i = 0; i < 512; ++i) {
+            pointers.at(i % pointers.size()) = std::move(pool.acquire());
+        }
+        for (uint i = 0; i < 4096; ++i) {
+            if (std::rand() % 2 == 0) {
+                pointers.at(i % pointers.size()) = pool.acquire();
+            } else {
+                pointers.at(i % pointers.size()).release();
+            }
+        }
+    }
+
+    if (pool.size() - pool.free_size() != sz - szf) {
+        acq0 = pool.acquire();
+        pool_t::value_type::cout_name();
+        return 1;
     }
     acq0 = pool.acquire();
     return 0;
