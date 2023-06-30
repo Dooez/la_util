@@ -13,7 +13,7 @@ public:
     aligned_allocator() = default;
 
     template<typename U>
-    explicit aligned_allocator(const aligned_allocator<U, Alignment>&) noexcept {};
+    explicit aligned_allocator(const aligned_allocator<U, Alignment>& /*unused*/) noexcept {};
 
     aligned_allocator(const aligned_allocator&)     = default;
     aligned_allocator(aligned_allocator&&) noexcept = default;

@@ -19,16 +19,16 @@ template<typename T>
 class pool_;
 
 template<typename T>
-class pool_alloc_manager {
+class pool_ctrl_block {
 public:
-    pool_alloc_manager() = default;
+    pool_ctrl_block() = default;
 
-    pool_alloc_manager(const pool_alloc_manager& other)                = delete;
-    pool_alloc_manager(pool_alloc_manager&& other) noexcept            = delete;
-    pool_alloc_manager& operator=(const pool_alloc_manager& other)     = delete;
-    pool_alloc_manager& operator=(pool_alloc_manager&& other) noexcept = delete;
+    pool_ctrl_block(const pool_ctrl_block& other)                = delete;
+    pool_ctrl_block(pool_ctrl_block&& other) noexcept            = delete;
+    pool_ctrl_block& operator=(const pool_ctrl_block& other)     = delete;
+    pool_ctrl_block& operator=(pool_ctrl_block&& other) noexcept = delete;
 
-    virtual ~pool_alloc_manager() = default;
+    virtual ~pool_ctrl_block() = default;
 
     [[nodiscard]] virtual auto allocate_buffer(std::size_t) -> T** = 0;
 
@@ -44,36 +44,36 @@ public:
 };
 
 template<typename T, typename Allocator>
-class pool_alloc_manager_ final : public pool_alloc_manager<T> {
+class pool_ctrl_block_ final : public pool_ctrl_block<T> {
     using alloc_traits   = std::allocator_traits<Allocator>;
     using pool_alloc_t   = typename alloc_traits::template rebind_alloc<pool_<T>>;
     using buffer_alloc_t = typename alloc_traits::template rebind_alloc<T*>;
 
 public:
-    using manager_alloc_t = typename alloc_traits::template rebind_alloc<pool_alloc_manager_<T, Allocator>>;
+    using ctrl_block_alloc_t = typename alloc_traits::template rebind_alloc<pool_ctrl_block_<T, Allocator>>;
 
-    pool_alloc_manager_() = delete;
+    pool_ctrl_block_() = delete;
 
-    pool_alloc_manager_(manager_alloc_t core_allocator, Allocator allocator)
+    pool_ctrl_block_(ctrl_block_alloc_t core_allocator, Allocator allocator)
     : m_this_allocator(std::move(core_allocator))
     , m_allocator(std::move(allocator))
     , m_buffer_allocator(static_cast<buffer_alloc_t>(m_allocator))
     , m_pool_allocator(static_cast<pool_alloc_t>(m_allocator))
     , m_pool_ptr(m_pool_allocator.allocate(1)){};
 
-    pool_alloc_manager_(const pool_alloc_manager_& other)     = delete;
-    pool_alloc_manager_(pool_alloc_manager_&& other) noexcept = delete;
+    pool_ctrl_block_(const pool_ctrl_block_& other)     = delete;
+    pool_ctrl_block_(pool_ctrl_block_&& other) noexcept = delete;
 
-    pool_alloc_manager_& operator=(const pool_alloc_manager_& other)     = delete;
-    pool_alloc_manager_& operator=(pool_alloc_manager_&& other) noexcept = delete;
+    pool_ctrl_block_& operator=(const pool_ctrl_block_& other)     = delete;
+    pool_ctrl_block_& operator=(pool_ctrl_block_&& other) noexcept = delete;
 
-    ~pool_alloc_manager_() final = default;
+    ~pool_ctrl_block_() final = default;
 
     void destroy() final {
         m_pool_ptr->~pool_<T>();
         m_pool_allocator.deallocate(m_pool_ptr, 1);
         auto this_alloc = m_this_allocator;
-        this->~pool_alloc_manager_();
+        this->~pool_ctrl_block_();
         this_alloc.deallocate(this, 1);
     }
 
@@ -98,10 +98,10 @@ public:
     };
 
 private:
-    [[no_unique_address]] manager_alloc_t m_this_allocator;
-    [[no_unique_address]] Allocator       m_allocator;
-    [[no_unique_address]] buffer_alloc_t  m_buffer_allocator;
-    [[no_unique_address]] pool_alloc_t    m_pool_allocator;
+    [[no_unique_address]] ctrl_block_alloc_t m_this_allocator;
+    [[no_unique_address]] Allocator          m_allocator;
+    [[no_unique_address]] buffer_alloc_t     m_buffer_allocator;
+    [[no_unique_address]] pool_alloc_t       m_pool_allocator;
 
     pool_<T>* m_pool_ptr;
 };    // namespace detail_
@@ -109,6 +109,7 @@ private:
 
 template<typename T>
 class pool_ {
+    // NOLINTBEGIN(*pointer-arithmetic*)
     using value_type = T;
     using pointer    = pooled_ptr<value_type>;
 
@@ -122,35 +123,35 @@ public:
 
     template<typename Allocator, typename... Args>
     static auto allocate_pool(Allocator allocator, Args&&... args) {
-        using manager_alloc_t = typename pool_alloc_manager_<T, Allocator>::manager_alloc_t;
+        using ctrl_block_alloc_t = typename pool_ctrl_block_<T, Allocator>::ctrl_block_alloc_t;
 
-        auto  core_allocator = static_cast<manager_alloc_t>(allocator);
-        auto* core_ptr       = std::allocator_traits<manager_alloc_t>::allocate(core_allocator, 1);
-        new (core_ptr) pool_alloc_manager_<T, Allocator>(core_allocator, allocator);
-        auto* pool_ptr = core_ptr->pool_ptr();
+        auto  ctrl_block_alloc = static_cast<ctrl_block_alloc_t>(allocator);
+        auto* ctrl_block_ptr   = std::allocator_traits<ctrl_block_alloc_t>::allocate(ctrl_block_alloc, 1);
+        new (ctrl_block_ptr) pool_ctrl_block_<T, Allocator>(ctrl_block_alloc, allocator);
+        auto* pool_ptr = ctrl_block_ptr->pool_ptr();
         new (pool_ptr)
-            pool_(static_cast<pool_alloc_manager<value_type>*>(core_ptr), std::forward<Args>(args)...);
+            pool_(static_cast<pool_ctrl_block<value_type>*>(ctrl_block_ptr), std::forward<Args>(args)...);
         return pool_ptr;
     };
 
     template<typename... Args>
         requires std::constructible_from<T, Args...> && (std::copy_constructible<Args> && ...)
-    explicit pool_(pool_alloc_manager<value_type>* core_ptr, Args&&... args)
-    : m_core(core_ptr)
+    explicit pool_(pool_ctrl_block<value_type>* core_ptr, Args&&... args)
+    : m_ctrl_block(core_ptr)
     , m_factory([&, ... args = std::forward<Args>(args)] {
-        auto* ptr = m_core->allocate(1);
+        auto* ptr = m_ctrl_block->allocate(1);
         return new (ptr) T(args...);
     })
     , m_deleter([&](T* ptr) {
         ptr->~T();
-        m_core->deallocate(ptr, 1);
+        m_ctrl_block->deallocate(ptr, 1);
     }){};
 
     template<typename F, typename D>
         requires std::constructible_from<std::function<T*()>, F> &&
                      std::constructible_from<std::function<void(T*)>, D>
-    pool_(pool_alloc_manager<value_type>* core_ptr, F&& factory, D&& deleter)
-    : m_core(core_ptr)
+    pool_(pool_ctrl_block<value_type>* core_ptr, F&& factory, D&& deleter)
+    : m_ctrl_block(core_ptr)
     , m_factory(std::forward<F>(factory))
     , m_deleter(std::forward<D>(deleter)){};
 
@@ -206,7 +207,7 @@ public:
             m_deleter(object_ptr);
             ++m_deleted;
             if (m_deleted == m_size)
-                m_core->destroy();
+                m_ctrl_block->destroy();
         } else {
             m_data[m_head_idx] = object_ptr;
             m_head_idx         = (m_head_idx + 1) % m_capacity;
@@ -222,13 +223,13 @@ public:
             ++m_deleted;
             m_tail_idx = (m_tail_idx + 1) % m_capacity;
         }
-        m_core->deallocate_buffer(m_data, m_capacity);
+        m_ctrl_block->deallocate_buffer(m_data, m_capacity);
         if (m_deleted == m_size)
-            m_core->destroy();
+            m_ctrl_block->destroy();
     }
 
 private:
-    pool_alloc_manager<T>* m_core;
+    pool_ctrl_block<T>* m_ctrl_block;
 
     std::function<T*()>     m_factory;
     std::function<void(T*)> m_deleter;
@@ -250,7 +251,7 @@ private:
     auto insert_no_mutex(std::size_t insert_n) -> T* {
         if (m_size + insert_n >= m_capacity) {
             auto  new_capacity = insert_n > 1 ? m_capacity + insert_n : m_capacity * 2;
-            auto* tmp_buf      = m_core->allocate_buffer(new_capacity);
+            auto* tmp_buf      = m_ctrl_block->allocate_buffer(new_capacity);
             if (m_head_idx > m_tail_idx) {
                 std::copy(m_data + m_tail_idx, m_data + m_tail_idx, tmp_buf);
             } else if (m_head_idx < m_tail_idx) {
@@ -259,7 +260,7 @@ private:
                 std::copy(m_data, m_data + m_head_idx, tmp_buf + len_tail);
             }
             if (m_data != nullptr)
-                m_core->deallocate_buffer(m_data, m_capacity);
+                m_ctrl_block->deallocate_buffer(m_data, m_capacity);
 
             m_data     = tmp_buf;
             m_capacity = new_capacity;
@@ -275,6 +276,8 @@ private:
         }
         return (m_data[old_head]);
     }
+
+    // NOLINTEND(*pointer-arithmetic*)
 };
 
 class separator {};
@@ -496,17 +499,16 @@ public:
         return {};
     }
 
-    //NOLINTBEGIN(*explicit*)
+
     /**
      * @brief Returns true if pooled_ptr manages an object.
      *
      * @return true Manages object.
      * @return false Manages no object.
      */
-    operator bool() const noexcept {
+    operator bool() const noexcept {    //NOLINT(*explicit*)
         return (m_pool_ptr != nullptr);
     }
-    //NOLINTEND(*explicit*)
 
     /**
      * @brief Returns a pointer to the managed object.
