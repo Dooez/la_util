@@ -23,8 +23,10 @@ class pool_ctrl_block_;
 
 /**
  * @brief Manages a ring buffer of pointers to elements. Maximum size is capacity - 1.
- * When inserting ecactly 1 element causes size to be equal to capacity, capacity is doubled.
- * Otherwise capacity is increased by the number of inserted elements.
+ * If inserting elements would cause size to be greater or equal to capacity,
+ * if inserting exactly one element, the capacity is doubled, otherwise the capacity is increased
+ * by the number of inserted elements.
+ *
  * Allocation, construction and deallocation of data are managed by the derived class.
  * Control block should be allocated on heap.
  * After calling abandon() control block waits for all managed elements to be returned and calls destroy().
