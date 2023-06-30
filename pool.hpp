@@ -42,7 +42,7 @@ public:
     [[nodiscard]] auto acquire() -> pointer {
         std::scoped_lock lock_t(tail_pool_mutex);
         if (m_head_idx != m_tail_idx) {
-            auto* data = m_data[m_tail_idx];
+            auto* data = m_data[m_tail_idx];    //NOLINT(*pointer*)
             m_tail_idx = (m_tail_idx + 1) % m_capacity;
             return {this, data};
         }
@@ -56,7 +56,7 @@ public:
     [[nodiscard]] auto acquire_free() -> pointer {
         std::scoped_lock lock_t(tail_pool_mutex);
         if (m_head_idx != m_tail_idx) {
-            auto data  = m_data[m_tail_idx];
+            auto data  = m_data[m_tail_idx];    //NOLINT(*pointer*)
             m_tail_idx = (m_tail_idx + 1) % m_capacity;
             return {this, data};
         }
@@ -92,7 +92,7 @@ public:
             if (m_deleted == m_size)
                 destroy();
         } else {
-            m_data[m_head_idx] = object_ptr;
+            m_data[m_head_idx] = object_ptr;    //NOLINT(*pointer*)
             m_head_idx         = (m_head_idx + 1) % m_capacity;
         }
     };
@@ -102,7 +102,7 @@ public:
         std::scoped_lock lock_t(tail_pool_mutex);
         m_abandoned = true;
         while (m_tail_idx != m_head_idx) {
-            delete_val(m_data[m_tail_idx]);
+            delete_val(m_data[m_tail_idx]);    //NOLINT(*pointer*)
             ++m_deleted;
             m_tail_idx = (m_tail_idx + 1) % m_capacity;
         }
@@ -156,12 +156,12 @@ private:
         }
         auto old_head = m_head_idx;
         for (uint i = 0; i < insert_n; ++i) {
-            m_data[m_head_idx] = new_val();
+            m_data[m_head_idx] = new_val();    //NOLINT(*pointer*)
 
             m_head_idx = (m_head_idx + 1) % m_capacity;
             ++m_size;
         }
-        return (m_data[old_head]);
+        return (m_data[old_head]);    //NOLINT(*pointer*)
     }
 };
 
@@ -311,6 +311,7 @@ public:
      */
     template<typename F, typename Allocator = std::allocator<T>>
         requires detail_::factory_of<T, F>
+    //NOLINTNEXTLINE(*forwarding*) const pool& would not satify factory_of<T>
     explicit pool(F&& factory, Allocator&& allocator = Allocator{}) {
         auto ctrl_block_ptr =
             detail_::allocate_ctrl_block<T>(std::forward<Allocator>(allocator), std::forward<F>(factory));
@@ -438,7 +439,7 @@ public:
      * @return std::shared_ptr<T>
      */
     explicit operator std::shared_ptr<T>() {
-        return make_shared();
+        return to_shared_ptr();
     }
 
     /**
@@ -448,7 +449,7 @@ public:
      * @return std::shared_ptr<T>
      */
     template<typename Allocator = std::allocator<T>>
-    auto make_shared(Allocator allocator = Allocator{}) -> std::shared_ptr<T> {
+    auto to_shared_ptr(Allocator allocator = Allocator{}) -> std::shared_ptr<T> {
         if (m_pool_ptr != nullptr) {
             auto ptr = std::shared_ptr<T>(
                 m_data, [parent_pool = m_pool_ptr](T* ptr) { parent_pool->release(ptr); }, allocator);
