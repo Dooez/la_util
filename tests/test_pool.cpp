@@ -60,7 +60,7 @@ int test_pool(T&& pool) {
         pool_t::value_type::cout_name();
         return 1;
     }
-    acq1.release();
+    acq1.reset();
     if (acq1) {
         pool_t::value_type::cout_name();
         return 1;
@@ -75,7 +75,8 @@ int test_pool(T&& pool) {
         pool_t::value_type::cout_name();
         return 1;
     }
-    auto sh_ptr = static_cast<std::shared_ptr<typename decltype(acq0)::element_type>>(acq0);
+    auto sh_ptr = static_cast<std::shared_ptr<typename decltype(acq0)::element_type>>(std::move(acq0));
+    // auto sh_ptr = std::shared_ptr<typename decltype(acq0)::element_type>(std::move(acq0));
     if (acq0) {
         pool_t::value_type::cout_name();
         return 1;
@@ -100,7 +101,7 @@ int test_pool(T&& pool) {
             if (std::rand() % 2 == 0) {
                 pointers.at(i % pointers.size()) = pool.acquire();
             } else {
-                pointers.at(i % pointers.size()).release();
+                pointers.at(i % pointers.size()).reset();
             }
         }
     }

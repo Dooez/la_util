@@ -7,8 +7,13 @@
 
 namespace mtmu {
 
-template<class T>
-class pooled_ptr;
+namespace detail_ {
+template<typename T>
+class pool_releaser;
+}    // namespace detail_
+
+template<typename T>
+using pooled_ptr = std::unique_ptr<T, detail_::pool_releaser<T>>;
 
 namespace detail_ {
 
@@ -20,10 +25,6 @@ concept factory_of = requires(F&& factory, T* placement_ptr) {
                          { factory(placement_ptr) } -> std::same_as<T*>;
                      };
 
-template<typename T, typename Allocator, typename F>
-    requires factory_of<F, T>
-class pool_ctrl_block_;
-
 /**
  * @brief Manages a ring buffer of pointers to elements. Maximum size is capacity - 1.
  * When inserting exactly 1 element causes size to be equal to capacity, capacity is doubled.
@@ -33,20 +34,20 @@ class pool_ctrl_block_;
  * After calling abandon() control block waits for all managed elements to be released and calls destroy().
  */
 template<typename T>
-class pool_ctrl_block {
+class pool_ctrl_block_common {
 protected:
-    pool_ctrl_block() = default;
+    pool_ctrl_block_common() = default;
 
 public:
     using value_type = T;
     using pointer    = pooled_ptr<value_type>;
 
-    pool_ctrl_block(const pool_ctrl_block& other)                = delete;
-    pool_ctrl_block(pool_ctrl_block&& other) noexcept            = delete;
-    pool_ctrl_block& operator=(const pool_ctrl_block& other)     = delete;
-    pool_ctrl_block& operator=(pool_ctrl_block&& other) noexcept = delete;
+    pool_ctrl_block_common(const pool_ctrl_block_common& other)                = delete;
+    pool_ctrl_block_common(pool_ctrl_block_common&& other) noexcept            = delete;
+    pool_ctrl_block_common& operator=(const pool_ctrl_block_common& other)     = delete;
+    pool_ctrl_block_common& operator=(pool_ctrl_block_common&& other) noexcept = delete;
 
-    virtual ~pool_ctrl_block() = default;
+    virtual ~pool_ctrl_block_common() = default;
 
     void populate(std::size_t insert_n) {
         std::scoped_lock lock_h(head_pool_mutex);
@@ -59,21 +60,20 @@ public:
         if (m_head_idx != m_tail_idx) {
             auto* data = m_data[m_tail_idx];    //NOLINT(*pointer*)
             m_tail_idx = (m_tail_idx + 1) % m_capacity;
-            return {this, data};
+            return {data, pool_releaser(this)};
         }
         std::scoped_lock lock_h(head_pool_mutex);
 
         auto* inserted = insert_no_mutex(1);
         m_tail_idx     = (m_tail_idx + 1) % m_capacity;
-        return {this, inserted};
+        return {inserted, pool_releaser(this)};
     };
-
     [[nodiscard]] auto acquire_free() -> pointer {
         std::scoped_lock lock_t(tail_pool_mutex);
         if (m_head_idx != m_tail_idx) {
             auto data  = m_data[m_tail_idx];    //NOLINT(*pointer*)
             m_tail_idx = (m_tail_idx + 1) % m_capacity;
-            return {this, data};
+            return {data, pool_releaser(this)};
         }
         return {};
     };
@@ -171,6 +171,42 @@ private:
     }
 };
 
+template<typename T>
+class pool_releaser {
+    friend void swap(pool_releaser& first, pool_releaser& second) {
+        using std::swap;
+        swap(first.parent_pool_ptr, second.parent_pool_ptr);
+    }
+    friend class pool_ctrl_block_common<T>;
+
+    explicit pool_releaser(pool_ctrl_block_common<T>* parent)
+    : parent_pool_ptr(parent){};
+
+public:
+    pool_releaser() = default;
+
+    pool_releaser(pool_releaser&& other) noexcept {
+        swap(*this, other);
+    };
+    pool_releaser& operator=(pool_releaser&& other) noexcept {
+        swap(*this, other);
+        return *this;
+    };
+
+    pool_releaser(const pool_releaser& other)            = delete;
+    pool_releaser& operator=(const pool_releaser& other) = delete;
+
+    ~pool_releaser() = default;
+
+    void operator()(T* ptr) {
+        if (ptr != nullptr)
+            parent_pool_ptr->release(ptr);
+    }
+
+private:
+    pool_ctrl_block_common<T>* parent_pool_ptr = nullptr;
+};
+
 /**
  * @brief Manages allocation and deallocation of data in pool.
  * Holds a copy of its own allocator. When destroy() is called,
@@ -178,29 +214,28 @@ private:
  */
 template<typename T, typename Allocator, typename F>
     requires factory_of<F, T>
-class pool_ctrl_block_ final : public pool_ctrl_block<T> {
+class pool_ctrl_block final : public pool_ctrl_block_common<T> {
     using alloc_traits   = std::allocator_traits<Allocator>;
     using buffer_alloc_t = typename alloc_traits::template rebind_alloc<T*>;
 
 public:
-    using ctrl_block_alloc_t =
-        typename alloc_traits::template rebind_alloc<pool_ctrl_block_<T, Allocator, F>>;
+    using ctrl_block_alloc_t = typename alloc_traits::template rebind_alloc<pool_ctrl_block<T, Allocator, F>>;
 
-    pool_ctrl_block_() = delete;
+    pool_ctrl_block() = delete;
 
-    pool_ctrl_block_(ctrl_block_alloc_t this_allocator, Allocator allocator, F factory)
+    pool_ctrl_block(ctrl_block_alloc_t this_allocator, Allocator allocator, F factory)
     : m_this_allocator(std::move(this_allocator))
     , m_allocator(std::move(allocator))
     , m_buffer_allocator(static_cast<buffer_alloc_t>(m_allocator))
     , m_factory(factory){};
 
-    pool_ctrl_block_(const pool_ctrl_block_& other)     = delete;
-    pool_ctrl_block_(pool_ctrl_block_&& other) noexcept = delete;
+    pool_ctrl_block(const pool_ctrl_block& other)     = delete;
+    pool_ctrl_block(pool_ctrl_block&& other) noexcept = delete;
 
-    pool_ctrl_block_& operator=(const pool_ctrl_block_& other)     = delete;
-    pool_ctrl_block_& operator=(pool_ctrl_block_&& other) noexcept = delete;
+    pool_ctrl_block& operator=(const pool_ctrl_block& other)     = delete;
+    pool_ctrl_block& operator=(pool_ctrl_block&& other) noexcept = delete;
 
-    ~pool_ctrl_block_() final = default;
+    ~pool_ctrl_block() final = default;
 
     void destroy() final {
         auto this_alloc = m_this_allocator;
@@ -236,24 +271,24 @@ static auto allocate_ctrl_block(Allocator allocator, Args&&... args) {
     auto factory = [... args = std::forward<Args>(args)](T* placement_ptr) {
         return new (placement_ptr) T(args...);
     };
-    using ctrl_block_alloc_t = typename pool_ctrl_block_<T, Allocator, decltype(factory)>::ctrl_block_alloc_t;
+    using ctrl_block_alloc_t = typename pool_ctrl_block<T, Allocator, decltype(factory)>::ctrl_block_alloc_t;
 
     auto  ctrl_block_alloc = static_cast<ctrl_block_alloc_t>(allocator);
     auto* ctrl_block_ptr   = std::allocator_traits<ctrl_block_alloc_t>::allocate(ctrl_block_alloc, 1);
     new (ctrl_block_ptr)
-        pool_ctrl_block_<T, Allocator, decltype(factory)>(ctrl_block_alloc, allocator, factory);
+        pool_ctrl_block<T, Allocator, decltype(factory)>(ctrl_block_alloc, allocator, factory);
     return ctrl_block_ptr;
 };
 
 template<typename T, typename Allocator, typename F>
     requires factory_of<F, T>
 static auto allocate_ctrl_block(Allocator allocator, F&& factory) {
-    using ctrl_block_alloc_t = typename pool_ctrl_block_<T, Allocator, F>::ctrl_block_alloc_t;
+    using ctrl_block_alloc_t = typename pool_ctrl_block<T, Allocator, F>::ctrl_block_alloc_t;
 
     auto  ctrl_block_alloc = static_cast<ctrl_block_alloc_t>(allocator);
     auto* ctrl_block_ptr   = std::allocator_traits<ctrl_block_alloc_t>::allocate(ctrl_block_alloc, 1);
     new (ctrl_block_ptr)
-        pool_ctrl_block_<T, Allocator, F>(ctrl_block_alloc, allocator, std::forward<F>(factory));
+        pool_ctrl_block<T, Allocator, F>(ctrl_block_alloc, allocator, std::forward<F>(factory));
     return ctrl_block_ptr;
 };
 
@@ -269,13 +304,13 @@ static auto allocate_ctrl_block(Allocator allocator, F&& factory) {
  */
 template<class T, bool Shared = false>
 class pool {
-    friend class pooled_ptr<T>;
     friend void swap(pool& first, pool& second) {
         using std::swap;
         swap(first.m_ctrl_block, second.m_ctrl_block);
     };
-    using ctrl_block_ptr_t = std::
-        conditional_t<Shared, std::shared_ptr<detail_::pool_ctrl_block<T>>, detail_::pool_ctrl_block<T>*>;
+    using ctrl_block_ptr_t = std::conditional_t<Shared,
+                                                std::shared_ptr<detail_::pool_ctrl_block_common<T>>,
+                                                detail_::pool_ctrl_block_common<T>*>;
 
 public:
     using value_type = T;
@@ -290,8 +325,8 @@ public:
         auto ctrl_block_ptr =
             detail_::allocate_ctrl_block<T>(std::allocator<T>{}, std::forward<Args>(args)...);
         if constexpr (Shared) {
-            m_ctrl_block =
-                ctrl_block_ptr_t(ctrl_block_ptr, [](detail_::pool_ctrl_block<T>* ptr) { ptr->abandon(); });
+            m_ctrl_block = ctrl_block_ptr_t(ctrl_block_ptr,
+                                            [](detail_::pool_ctrl_block_common<T>* ptr) { ptr->abandon(); });
         } else {
             m_ctrl_block = ctrl_block_ptr;
         }
@@ -308,12 +343,11 @@ public:
         auto ctrl_block_ptr = detail_::allocate_ctrl_block<T>(allocator, std::forward<Args>(args)...);
         if constexpr (Shared) {
             m_ctrl_block = ctrl_block_ptr_t(
-                ctrl_block_ptr, [](detail_::pool_ctrl_block<T>* ptr) { ptr->abandon(); }, allocator);
+                ctrl_block_ptr, [](detail_::pool_ctrl_block_common<T>* ptr) { ptr->abandon(); }, allocator);
         } else {
             m_ctrl_block = ctrl_block_ptr;
         }
     };
-
 
     /**
      * @param factory invoked to construct object in place `ptr = factory(placement_ptr)`.
@@ -326,8 +360,8 @@ public:
         auto ctrl_block_ptr =
             detail_::allocate_ctrl_block<T>(std::forward<Allocator>(allocator), std::forward<F>(factory));
         if constexpr (Shared) {
-            m_ctrl_block =
-                ctrl_block_ptr_t(ctrl_block_ptr, [](detail_::pool_ctrl_block<T>* ptr) { ptr->abandon(); });
+            m_ctrl_block = ctrl_block_ptr_t(ctrl_block_ptr,
+                                            [](detail_::pool_ctrl_block_common<T>* ptr) { ptr->abandon(); });
         } else {
             m_ctrl_block = ctrl_block_ptr;
         }
@@ -345,6 +379,7 @@ public:
     };
     pool& operator=(pool&& other) noexcept {
         swap(*this, other);
+        return *this;
     };
 
     pool(const pool&)            = delete;
@@ -403,128 +438,10 @@ public:
     }
 
 private:
-    ctrl_block_ptr_t m_ctrl_block{};
+    ctrl_block_ptr_t m_ctrl_block = nullptr;
 };
 template<class T>
 using shared_pool = pool<T, true>;
-
-/**
- * @brief Smart pointer that manages an object from pool<>.
- * A pooled_ptr may manage no objects.
- * If pooled_ptr manages an object, pooled_ptr releases object back into the pool when it goes out of scope.
- * pooled_ptr is move constructable and move assignable, but neigher copy constructable nor copy assignable.
- *
- * @tparam T
- */
-template<class T>
-class pooled_ptr {
-    using pool_t = typename detail_::pool_ctrl_block<T>;
-    friend pool_t;
-    friend void swap(pooled_ptr& first, pooled_ptr& second) {
-        using std::swap;
-        swap(first.m_pool_ptr, second.m_pool_ptr);
-        swap(first.m_data, second.m_data);
-    }
-
-public:
-    using element_type = T;
-    using pointer      = T*;
-    /**
-     * @brief Construct a new pooled_ptr object that manages no objects.
-     *
-     */
-    pooled_ptr() = default;
-    pooled_ptr(pooled_ptr&& other) noexcept {
-        swap(*this, other);
-    };
-    pooled_ptr& operator=(pooled_ptr&& other) noexcept {
-        swap(*this, other);
-        return *this;
-    };
-
-    ~pooled_ptr() {
-        release();
-    }
-
-    pooled_ptr(const pooled_ptr&)            = delete;
-    pooled_ptr& operator=(const pooled_ptr&) = delete;
-
-    /**
-     * @brief Constructs and returns a shared_ptr that manages an object currently managed by *this.
-     * *this manages no objects after return.
-     *
-     * @return std::shared_ptr<T>
-     */
-    explicit operator std::shared_ptr<T>() {
-        return to_shared_ptr();
-    }
-
-    /**
-     * @brief Constructs and returns a shared_ptr that manages an object currently managed by *this.
-     *  *this manages no objects after return.
-     * @param allocator allocator passed to shared_ptr for internal allocations.
-     */
-    template<typename Allocator = std::allocator<T>>
-    auto to_shared_ptr(Allocator allocator = Allocator{}) -> std::shared_ptr<T> {
-        if (m_pool_ptr != nullptr) {
-            auto ptr = std::shared_ptr<T>(
-                m_data, [parent_pool = m_pool_ptr](T* ptr) { parent_pool->release(ptr); }, allocator);
-            m_pool_ptr = nullptr;
-            m_data     = nullptr;
-            return ptr;
-        }
-        return {};
-    }
-
-
-    /**
-     * @brief Returns true if pooled_ptr manages an object.
-     *
-     * @return true manages object.
-     * @return false manages no object.
-     */
-    operator bool() const noexcept {    //NOLINT(*explicit*)
-        return (m_pool_ptr != nullptr);
-    }
-
-    /**
-     * @brief Returns the pointer to the managed object.
-     */
-    [[nodiscard]] auto get() const -> pointer {
-        return m_data;
-    }
-    /**
-     * @brief Dereferences pointer to the managed object.
-     */
-    [[nodiscard]] auto operator*() const -> element_type& {
-        return *m_data;
-    }
-    /**
-     * @brief Accesses members of the managed object.
-     */
-    [[nodiscard]] auto operator->() const -> pointer {
-        return m_data;
-    }
-
-    /**
-     * @brief Releases managed object back into the pool. *this manages no objects afterwards.
-     */
-    void release() {
-        if (m_pool_ptr != nullptr) {
-            m_pool_ptr->release(m_data);
-            m_pool_ptr = nullptr;
-            m_data     = nullptr;
-        }
-    }
-
-private:
-    pooled_ptr(pool_t* parent_pool, pointer object_ptr)
-    : m_pool_ptr(parent_pool)
-    , m_data(object_ptr){};
-
-    pool_t* m_pool_ptr = nullptr;
-    pointer m_data     = nullptr;
-};
 
 };    // namespace mtmu
 
