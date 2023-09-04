@@ -1,5 +1,5 @@
-#ifndef LA_OBJECT_POOL_H
-#define LA_OBJECT_POOL_H
+#ifndef LA_POOL_H
+#define LA_POOL_H
 
 #include <concepts>
 #include <memory>
@@ -22,8 +22,8 @@ concept allocator_of = std::same_as<typename Allocator::value_type, T>;
 
 template<typename F, typename T>
 concept factory_of = requires(F&& factory, T* placement_ptr) {
-    { factory(placement_ptr) } -> std::same_as<T*>;
-};
+                         { factory(placement_ptr) } -> std::same_as<T*>;
+                     };
 
 /**
  * @brief Manages a ring buffer of pointers to elements. Maximum size is capacity - 1.
@@ -305,11 +305,11 @@ static auto allocate_ctrl_block(Allocator allocator, F&& factory) {
 
 /**
  * @brief Pool of reusable objects.
- * When necessary creates new elements using provided or generated factory.
+ * When necessary creates new elements on heap, using provided or generated factory.
  * Uses heap allocated internal control block that persists until the last element is released.
  *
- * @tparam T
- * @tparam Shared if true enables copy construction and assignment.
+ * @tparam T      Stored type.
+ * @tparam Shared If true, enables copy construction and assignment.
  */
 template<class T, bool Shared = false>
 class pool {
@@ -326,7 +326,7 @@ public:
     using pointer    = pooled_ptr<value_type>;
 
     /**
-     * @param args arguments passed to operator new when creating data elements.
+     * @param args Arguments passed to operator new when creating data elements.
      */
     template<typename... Args>
         requires std::constructible_from<T, Args...> && (std::copy_constructible<Args> && ...)
@@ -342,8 +342,8 @@ public:
     };
 
     /**
-     * @param allocator allocator used for allocation of internal control block and data elements.
-     * @param args arguments passed to operator new when creating data elements.
+     * @param allocator Allocator used for allocation of internal control block and data elements.
+     * @param args      Arguments passed to constructor when creating data elements.
      */
     template<typename Allocator, typename... Args>
         requires std::constructible_from<T, Args...> &&
@@ -359,8 +359,8 @@ public:
     };
 
     /**
-     * @param factory invoked to construct object in place `ptr = factory(placement_ptr)`.
-     * @param allocator allocator used for allcation of internal control block and data elements.
+     * @param factory   Invoked to construct object in place: `ptr = factory(placement_ptr);`.
+     * @param allocator Used for allcation of internal control block and data elements.
      */
     template<typename F, typename Allocator = std::allocator<T>>
         requires detail_::factory_of<F, T> && detail_::allocator_of<Allocator, T>
@@ -403,8 +403,8 @@ public:
 
     /**
      * @brief Creates new data elements and inserts them into pool.
-     *
-     * @param insert_n number of elements to insert.
+     
+     * @param insert_n Number of elements to insert.
      */
     void populate(std::size_t insert_n) {
         m_ctrl_block->populate(insert_n);
@@ -412,16 +412,16 @@ public:
 
     /**
      * @brief Acquires an element from pool. If no free elements are available creates a single new element.
-     *
-     * @return pooled_ptr<T> smart pointer to the element.
+     
+     * @return pooled_ptr<T> Smart pointer to the element.
      */
     [[nodiscard]] auto acquire() -> pointer {
         return m_ctrl_block->acquire();
     };
     /**
      * @brief Attempts to acquire a free element from pool. If no free element are available returns an empty pooled_ptr.
-     *
-     * @return pooled_ptr<T> smart pointer to the element. Empty if no free elements are available.
+     
+     * @return pooled_ptr<T> Smart pointer to the element. Empty if no free elements are available.
      */
     [[nodiscard]] auto acquire_free() -> pointer {
         return m_ctrl_block->acquire_free();
@@ -429,8 +429,8 @@ public:
 
     /**
      * @brief Returns the total number of elements in the pool.
-     * Does not lock mutexes, possibly inaccurate.
-     *
+     May be inaccurate if separate thread creates new elements.
+     
      * @return std::size_t number of objects in pool.
      */
     [[nodiscard]] auto size() const -> std::size_t {
@@ -438,8 +438,8 @@ public:
     }
     /**
      * @brief Returns the number of free elements in the pool.
-     * Does not lock mutexes, possibly inaccurate.
-     *
+     May be inaccurate if separate thread creates or acquires elements.
+     
      * @return std::size_t number of free objects in pool.
      */
     [[nodiscard]] auto free_size() const -> std::size_t {

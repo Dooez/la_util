@@ -1,6 +1,7 @@
 #include "pool.hpp"
 #include "test_base.h"
 
+#include <array>
 #include <iostream>
 #include <type_traits>
 #include <typeinfo>
