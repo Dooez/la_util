@@ -22,8 +22,8 @@ concept allocator_of = std::same_as<typename Allocator::value_type, T>;
 
 template<typename F, typename T>
 concept factory_of = requires(F&& factory, T* placement_ptr) {
-                         { factory(placement_ptr) } -> std::same_as<T*>;
-                     };
+    { factory(placement_ptr) } -> std::same_as<T*>;
+};
 
 /**
  * @brief Manages a ring buffer of pointers to elements. Maximum size is capacity - 1.
@@ -31,7 +31,7 @@ concept factory_of = requires(F&& factory, T* placement_ptr) {
  * Otherwise capacity is increased by the number of inserted elements.
  * Allocation, construction and deallocation of data and buffer are managed by the derived class.
  * Control block should be allocated on heap.
- * After calling abandon() control block waits for all managed elements to be released and calls destroy().
+ * After calling `abandon()` control block waits for all managed elements to be released and calls `destroy()`.
  */
 template<typename T>
 class pool_ctrl_block_common {
@@ -68,6 +68,7 @@ public:
         m_tail_idx     = (m_tail_idx + 1) % m_capacity;
         return {inserted, pool_releaser(this)};
     };
+
     [[nodiscard]] auto acquire_free() -> pointer {
         std::scoped_lock lock_t(tail_pool_mutex);
         if (m_head_idx != m_tail_idx) {
@@ -141,9 +142,17 @@ private:
     virtual void               deallocate_buffer(T**, std::size_t) = 0;
     virtual void               destroy()                           = 0;
 
+    /**
+     * @brief Inserts new values into the pool.
+     If free buffer has insufficient capacity, allocates new buffer.
+     External mutex lock of both head and tail mutexes must be made.
+     
+     * @param insert_n  Number of objects to insert.
+     * @return T*       Pointer to the first inserted object.
+     */
     auto insert_no_mutex(std::size_t insert_n) -> T* {
         if (m_size + insert_n >= m_capacity) {
-            auto  new_capacity = insert_n > 1 ? m_capacity + insert_n : m_capacity * 2;
+            auto  new_capacity = insert_n > 1 ? m_size + insert_n + 1 : m_capacity * 2;
             auto* tmp_buf      = allocate_buffer(new_capacity);
             if (m_head_idx > m_tail_idx) {
                 std::copy(m_data + m_tail_idx, m_data + m_tail_idx, tmp_buf);
@@ -161,7 +170,7 @@ private:
             m_tail_idx = 0;
         }
         auto old_head = m_head_idx;
-        for (uint i = 0; i < insert_n; ++i) {
+        for (std::size_t i = 0; i < insert_n; ++i) {
             m_data[m_head_idx] = new_val();    //NOLINT(*pointer*)
 
             m_head_idx = (m_head_idx + 1) % m_capacity;
