@@ -14,6 +14,8 @@ class pool_releaser;
 
 template<typename T>
 using pooled_ptr = std::unique_ptr<T, detail_::pool_releaser<T>>;
+template<typename T>
+using shared_pooled_ptr = std::shared_ptr<T>;
 
 namespace detail_ {
 
@@ -22,8 +24,8 @@ concept allocator_of = std::same_as<typename Allocator::value_type, T>;
 
 template<typename F, typename T>
 concept factory_of = requires(F&& factory, T* placement_ptr) {
-                         { factory(placement_ptr) } -> std::same_as<T*>;
-                     };
+    { factory(placement_ptr) } -> std::same_as<T*>;
+};
 
 /**
  * @brief Manages a ring buffer of pointers to elements. Maximum size is capacity - 1.
