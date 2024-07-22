@@ -1,9 +1,11 @@
 #include "pool.hpp"
 #include "test_base.h"
 
+#include <array>
 #include <iostream>
 #include <type_traits>
 #include <typeinfo>
+
 template<typename T, std::align_val_t Alignment = std::align_val_t{64}>
 class aligned_allocator {
 public:
@@ -154,7 +156,8 @@ int test_pools(Types&&... args) {
 
 int main() {
     auto dummy = test::create_test_tuple<test::member_selector{}>();
-    auto ret   = std::apply([](auto&&... args) { return test_pools(args...); }, *dummy);
+    auto ret =
+        std::apply([](auto&&... args) { return test_pools(std::forward<decltype(args)>(args)...); }, *dummy);
 
     return ret;
 }

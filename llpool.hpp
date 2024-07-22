@@ -4,7 +4,6 @@
 #include <atomic>
 #include <concepts>
 #include <memory>
-#include <mutex>
 
 namespace mtmu::ll {
 
@@ -26,8 +25,8 @@ concept allocator_of = std::same_as<typename Allocator::value_type, T>;
 
 template<typename F, typename T>
 concept factory_of = requires(F&& factory, T* placement_ptr) {
-                         { factory(placement_ptr) } -> std::same_as<T*>;
-                     };
+    { factory(placement_ptr) } -> std::same_as<T*>;
+};
 
 /**
  * @brief Manages a ring buffer of pointers to elements. Maximum size is capacity - 1.
@@ -55,22 +54,22 @@ public:
 
     [[nodiscard]] auto try_acquire() -> pointer {
         auto tail = m_tail.load(std::memory_order_acquire);
-        auto head = m_head.load(std::memory_order_acquire);
-        if (tail == head)
+        if (tail == m_head.load(std::memory_order_acquire))
             return {};
-        while (!m_tail.compare_exchange_strong(
-            tail, tail + 1, std::memory_order_acq_rel, std::memory_order_acquire)) {
+        while (!m_tail.compare_exchange_strong(tail, tail + 1, std::memory_order_acq_rel)) {
             if (tail == m_head.load(std::memory_order_acquire))
                 return {};
         }
         tail %= m_ring_size;
-        //NOLINTBEGIN(*pointer*)
         auto ptr = m_ring_buffer[tail].load(std::memory_order_acquire);
-        while (ptr == nullptr) {
-            ptr = m_ring_buffer[tail].load(std::memory_order_acquire);
+        while (true) {
+            if (ptr == nullptr) {
+                ptr = m_ring_buffer[tail].load(std::memory_order_acquire);
+                continue;
+            }
+            if (m_ring_buffer[tail].compare_exchange_strong(ptr, nullptr, std::memory_order_acq_rel))
+                break;
         }
-        m_ring_buffer[tail].store(nullptr, std::memory_order_release);
-        //NOLINTEND(*pointer*)
         return {ptr, pool_releaser(this)};
     };
 
@@ -78,15 +77,16 @@ public:
         if (m_abandoned.load(std::memory_order_acquire)) {
             object_ptr->~T();
             auto deleted = m_deleted.fetch_add(1, std::memory_order_acq_rel);
-            if (m_deleted + 1 + (m_head - m_tail) == m_size)
+            if (deleted + 1 +
+                    (m_head.load(std::memory_order_acquire) - m_tail.load(std::memory_order_acquire)) ==
+                m_size)
                 cleanup();
             return;
         }
         auto head = m_head.fetch_add(1, std::memory_order_acq_rel);
         head %= m_ring_size;
-        //NOLINTNEXTLINE(*pointer*)
-        while (!m_ring_buffer[head].compare_exchange_strong(
-            nullptr, object_ptr, std::memory_order_acq_rel, std::memory_order_relaxed)) {};
+        while (!m_ring_buffer[head].compare_exchange_strong(nullptr, object_ptr, std::memory_order_acq_rel)) {
+        }
     };
 
     inline void abandon() {
@@ -122,12 +122,9 @@ private:
         auto tail = m_tail.load(std::memory_order_acquire);
         auto head = m_tail.load(std::memory_order_acquire);
         while (tail != head) {
-            //NOLINTBEGIN(*pointer*)
             auto ptr = m_ring_buffer[tail % m_ring_size].load(std::memory_order_acquire);
-            while (ptr == nullptr) {
+            while (ptr == nullptr)
                 ptr = m_ring_buffer[tail % m_ring_size].load(std::memory_order_acquire);
-            }
-            //NOLINTEND(*pointer*)
             ptr->~T();
             ++tail;
         }
@@ -143,7 +140,7 @@ class pool_releaser {
     friend class pool_ctrl_block_common<T>;
 
     explicit pool_releaser(pool_ctrl_block_common<T>* parent)
-    : parent_pool_ptr(parent){};
+    : parent_pool_ptr(parent) {};
 
 public:
     pool_releaser() = default;
@@ -190,7 +187,7 @@ public:
     : m_this_allocator(std::move(this_allocator))
     , m_allocator(std::move(allocator))
     , m_buffer_allocator(static_cast<buffer_alloc_t>(m_allocator))
-    , m_factory(factory){};
+    , m_factory(factory) {};
 
     pool_ctrl_block(const pool_ctrl_block& other)     = delete;
     pool_ctrl_block(pool_ctrl_block&& other) noexcept = delete;
