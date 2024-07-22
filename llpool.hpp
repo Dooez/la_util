@@ -1,6 +1,7 @@
 #ifndef LA_OBJECT_POOL_H
 #define LA_OBJECT_POOL_H
 
+#include <algorithm>
 #include <atomic>
 #include <concepts>
 #include <memory>
@@ -106,7 +107,6 @@ public:
 private:
     uZ m_size      = 0;
     uZ m_ring_size = 1;
-
 
     std::atomic<u32> m_head;
     std::atomic<u32> m_tail;
@@ -219,6 +219,81 @@ public:
     };
 
 private:
+    using first_t  = std::conditional_t<(alignof(pool_ctrl_block_common<T>) > alignof(Allocator)),
+                                        pool_ctrl_block_common<T>,
+                                        Allocator>;
+    using second_t = std::conditional_t<(alignof(pool_ctrl_block_common<T>) > alignof(Allocator)),
+                                        Allocator,
+                                        pool_ctrl_block_common<T>>;
+
+    auto calc_size(uZ pool_size) -> uZ {
+        constexpr auto alloc_align = alignof(Allocator);
+        constexpr auto ctrl_align  = alignof(pool_ctrl_block_common<T>);
+        constexpr auto aptr_align  = alignof(std::atomic<T*>);
+        constexpr auto data_align  = alignof(T);
+
+        constexpr auto first_align  = alignof(first_t);
+        constexpr auto second_align = alignof(second_t);
+
+        constexpr auto first_size = sizeof(first_t);
+        constexpr auto first_size_al =
+            first_size + (first_size % second_align > 0 ? second_align - first_size % second_align : 0);
+
+        constexpr auto util_size = first_size_al + sizeof(second_t);
+        constexpr auto util_size_al =
+            util_size + (util_size % aptr_align > 0 ? aptr_align - util_size % aptr_align : 0);
+
+        auto ring_count = pool_size;
+
+        if constexpr (data_align > first_align) {
+            auto data_size = pool_size * sizeof(T);
+            auto data_size_al =
+                data_size + (data_size % first_align > 0 ? first_align - data_size % first_align : 0);
+            return data_size_al + util_size_al + ring_count * sizeof(std::atomic<T*>);
+        } else {
+            auto non_data_size = util_size_al + ring_count * sizeof(std::atomic<T*>);
+            auto non_data_size_al =
+                non_data_size +
+                (non_data_size % data_align > 0 ? data_align - non_data_size % data_align : 0);
+
+            return non_data_size_al + pool_size * sizeof(T);
+        }
+    }
+
+    static constexpr auto alignment = std::max({alignof(pool_ctrl_block_common<T>),    //
+                                                alignof(std::atomic<T*>),
+                                                alignof(T),
+                                                alignof(Allocator)});
+
+    struct alignas(alignment) aligned_bytes {
+        std::array<char, alignment> values;
+    };
+
+    auto alloc(uZ pool_size) {
+        auto  raw_size   = calc_size(pool_size);
+        auto  ring_count = pool_size;
+        auto  buf_size   = raw_size / alignment + (raw_size % alignment > 0 ? 1 : 0);
+        auto* raw_buf    = new aligned_bytes[buf_size];
+        auto  space      = buf_size * sizeof(aligned_bytes);
+        if constexpr (alignof(T) > alignof(first_t)) {
+            auto* data_ptr = reinterpret_cast<T*>(std::align(alignof(T), pool_size, raw_buf, space));
+            if (data_ptr == nullptr)
+                return;
+            auto* first_ptr = reinterpret_cast<first_t*>(std::align(alignof(first_t), 1, raw_buf, space));
+            if (first_ptr == nullptr)
+                return;
+            auto* second_ptr = reinterpret_cast<second_t*>(std::align(alignof(second_t), 1, raw_buf, space));
+            if (second_ptr == nullptr)
+                return;
+            auto* ring_ptr = reinterpret_cast<std::atomic<T*>*>(std::align(alignof(std::atomic<T*>),    //
+                                                                           ring_count,
+                                                                           raw_buf,
+                                                                           space));
+            if (ring_ptr == nullptr)
+                return;
+        }
+    };
+
     [[no_unique_address]] ctrl_block_alloc_t m_this_allocator;
     [[no_unique_address]] Allocator          m_allocator;
     [[no_unique_address]] buffer_alloc_t     m_buffer_allocator;
