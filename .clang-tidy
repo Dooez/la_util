@@ -1,4 +1,4 @@
-Checks: '*, -altera*, -fuchsia*, -llvm-*, -llvmlibc-*, -bugprone-easily-swappable-parameters, -cppcoreguidelines-owning-memory, -modernize-use-trailing-return-type, -readability-identifier-length'
+Checks: '*, -altera*, -fuchsia*, -llvm-*, -llvmlibc-*, -bugprone-easily-swappable-parameters, -cppcoreguidelines-owning-memory, -modernize-use-trailing-return-type, -readability-identifier-length, -cppcoreguidelines-pro-bounds-pointer-arithmetic, -*reinterpret-cast*'
 CheckOptions:
     - key: readability-magic-numbers.IgnorePowersOf2IntegerValues
       value : true
