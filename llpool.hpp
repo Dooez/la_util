@@ -19,8 +19,11 @@ template<typename T>
 class pool_releaser;
 }    // namespace detail_
 
-template<typename T>
-using pooled_ptr = std::unique_ptr<T, detail_::pool_releaser<T>>;
+template<typename T, bool Managed>
+class pooled_ptr;
+
+template<typename T, bool Managed>
+class arc_pooled_ptr;
 
 namespace detail_ {
 
@@ -37,6 +40,7 @@ enum class pool_memory_management {
     memory_leak,
     terminate
 };
+
 
 /**
  * @brief Manages a ring buffer of pointers to elements. Maximum size is capacity - 1.
@@ -55,7 +59,7 @@ struct pool_ctrl_block_common {
     using deallocate_fptr_t = std::conditional_t<Managed, void (*)(std::byte*), decltype([] {})>;
     using rawptr_t          = std::conditional_t<Managed, std::byte*, decltype([] {})>;
 
-    using pointer = pooled_ptr<value_t>;
+    using pointer = pooled_ptr<value_t, Managed>;
 
     pool_ctrl_block_common(uZ size, uZ ring_size, atomic_ptr_t* ring, atomic_cnt_t* counters) noexcept
         requires(!Managed)
@@ -170,6 +174,7 @@ struct pool_ctrl_block_common {
 
     uZ            m_size;
     uZ            m_ring_size;
+    value_t*      m_data_begin;
     atomic_ptr_t* m_ring_buffer;
     atomic_cnt_t* m_counters;
 
@@ -217,6 +222,7 @@ public:
     , m_storage_ptr(storage)
     , m_storage_size(storage_size)
     , m_ctrl_block(size, ring_size, ring, element_counters) {};
+
 
     pool_ctrl_block(const pool_ctrl_block& other)     = delete;
     pool_ctrl_block(pool_ctrl_block&& other) noexcept = delete;
@@ -374,6 +380,109 @@ private:
 };
 
 }    // namespace detail_
+
+template<typename T, bool Managed>
+class pooled_ptr {
+    using ctrl_block_t = detail_::pool_ctrl_block_common<T, Managed>;
+    using value_t      = T;
+
+    pooled_ptr(value_t* data_ptr, ctrl_block_t* ctrl_block_ptr)
+    : m_data_ptr(data_ptr)
+    , m_ctrl_block_ptr(ctrl_block_ptr) {};
+
+public:
+    pooled_ptr()                             = default;
+    pooled_ptr(const pooled_ptr&)            = delete;
+    pooled_ptr& operator=(const pooled_ptr&) = delete;
+
+    friend void swap(pooled_ptr& lhs, pooled_ptr& rhs) noexcept {
+        std::swap(lhs.m_ctrl_block_ptr, rhs.m_ctrl_block_ptr);
+    }
+    pooled_ptr(pooled_ptr&& other) noexcept
+    : m_data_ptr(other.m_data_ptr)
+    , m_ctrl_block_ptr(other.m_ctrl_block_ptr) {
+        other.m_ctrl_block_ptr = nullptr;
+    };
+    pooled_ptr& operator=(pooled_ptr&& other) noexcept {
+        swap(*this, other);
+        return *this;
+    };
+    ~pooled_ptr() {
+        if (m_ctrl_block_ptr != nullptr)
+            m_ctrl_block_ptr->release(m_data_ptr);
+    };
+    auto make_arc_ptr() noexcept -> arc_pooled_ptr<T, Managed> {
+        uZ    offest         = m_data_ptr - m_ctrl_block_ptr->m_data_begin;
+        auto* counter_ptr    = m_ctrl_block_ptr->m_counters[offest];
+        auto* ctrl_block_ptr = m_ctrl_block_ptr;
+        auto* data_ptr       = m_data_ptr;
+        m_ctrl_block_ptr     = nullptr;
+        m_data_ptr           = nullptr;
+        return {ctrl_block_ptr, counter_ptr, data_ptr};
+    }
+    explicit operator bool() const noexcept {
+        return m_ctrl_block_ptr != nullptr;
+    }
+
+private:
+    value_t*      m_data_ptr;
+    ctrl_block_t* m_ctrl_block_ptr{};
+};
+
+template<typename T, bool Managed>
+class arc_pooled_ptr {
+    using value_t      = T;
+    using ctrl_block_t = detail_::pool_ctrl_block_common<value_t, Managed>;
+    using atomic_cnt_t = ctrl_block_t::atomic_cnt_t;
+
+    friend class pooled_ptr<T, Managed>;
+    friend ctrl_block_t;
+
+    arc_pooled_ptr(ctrl_block_t* ctrl_block_ptr, atomic_cnt_t* counter_ptr, value_t* data_ptr) noexcept
+    : m_ctrl_block_ptr(ctrl_block_ptr)
+    , m_counter_ptr(counter_ptr)
+    , m_data_ptr(data_ptr) {};
+
+public:
+    arc_pooled_ptr() noexcept = default;
+
+    arc_pooled_ptr(arc_pooled_ptr&& other) noexcept
+    : m_ctrl_block_ptr{other.m_ctrl_block_ptr}
+    , m_counter_ptr{other.m_counter_ptr}
+    , m_data_ptr{other.m_data_ptr} {
+        other.m_ctrl_block_ptr = nullptr;
+    };
+    arc_pooled_ptr(const arc_pooled_ptr& other)
+    : m_ctrl_block_ptr(other.m_ctrl_block_ptr)
+    , m_counter_ptr(other.m_counter_ptr)
+    , m_data_ptr(other.m_data_ptr) {
+        m_counter_ptr->fetch_add(1, std::memory_order_acq_rel);
+    };
+
+    arc_pooled_ptr& operator=(arc_pooled_ptr&&)      = default;
+    arc_pooled_ptr& operator=(const arc_pooled_ptr&) = default;
+
+    ~arc_pooled_ptr() {
+        if (m_ctrl_block_ptr == nullptr)
+            return;
+        auto refs = m_counter_ptr->fetch_sub(std::memory_order_acq_rel);
+        if (refs == 1)
+            m_ctrl_block_ptr->release(m_data_ptr);
+    };
+
+    explicit arc_pooled_ptr(pooled_ptr<T, Managed>&& ptr) noexcept
+    : arc_pooled_ptr(ptr.make_arc_ptr()) {};
+
+    explicit operator bool() const noexcept {
+        return m_ctrl_block_ptr != nullptr;
+    }
+
+private:
+    value_t*      m_data_ptr;
+    ctrl_block_t* m_ctrl_block_ptr{};
+    atomic_cnt_t* m_counter_ptr;
+};
+
 /**
  * @brief Pool of reusable objects.
  * When necessary creates new elements using provided or generated factory.
