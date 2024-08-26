@@ -5,6 +5,7 @@
 #include <atomic>
 #include <concepts>
 #include <cstdint>
+#include <cstdlib>
 #include <exception>
 #include <memory>
 #include <type_traits>
@@ -13,6 +14,14 @@ namespace mtmu::ll {
 
 using uZ  = std::size_t;
 using u32 = uint32_t;
+
+enum class pool_memory_management {
+    managed,
+    memory_leak,
+    terminate
+};
+template<typename T, typename Allocator, pool_memory_management MemManagement>
+class pool;
 
 namespace detail_ {
 template<typename T>
@@ -34,12 +43,11 @@ template<typename F, typename T>
 concept placement_ctor = requires(F&& p_ctor, T* placement_ptr) {
     { p_ctor(placement_ptr) } -> std::same_as<T*>;
 };
-
-enum class pool_memory_management {
-    managed,
-    memory_leak,
-    terminate
+template<typename T, uZ align>
+class alignas(std::max(align, alignof(T))) aligned : public T {
+    using T::T;
 };
+constexpr uZ align_n = 64;
 
 
 /**
@@ -52,24 +60,37 @@ enum class pool_memory_management {
  */
 template<typename T, bool Managed>
 struct pool_ctrl_block_common {
-    using value_t           = T;
-    using atomic_ptr_t      = std::atomic<value_t*>;    // Potentially overalign
-    using atomic_cnt_t      = std::atomic<uZ>;          // Potentially overalign
-    using atomic_flg_t      = std::atomic<bool>;
-    using deallocate_fptr_t = std::conditional_t<Managed, void (*)(std::byte*), decltype([] {})>;
-    using rawptr_t          = std::conditional_t<Managed, std::byte*, decltype([] {})>;
+    using value_t = T;
+    /*using atomic_ptr_t = std::atomic<value_t*>;*/
+    /*using atomic_cnt_t = std::atomic<uZ>;*/
+    using atomic_ptr_t = aligned<std::atomic<value_t*>, align_n>;
+    using atomic_cnt_t = aligned<std::atomic<uZ>, align_n>;
+    using atomic_flg_t = aligned<std::atomic<bool>, align_n>;
+
+    static_assert(atomic_ptr_t::is_always_lock_free);
+    static_assert(atomic_cnt_t::is_always_lock_free);
+    static_assert(atomic_flg_t::is_always_lock_free);
+
+    using deallocate_fptr_t = std::conditional_t<Managed, void (*)(void*), decltype([] {})>;
+    using rawptr_t          = std::conditional_t<Managed, void*, decltype([] {})>;
 
     using pointer = pooled_ptr<value_t, Managed>;
 
-    pool_ctrl_block_common(uZ size, uZ ring_size, atomic_ptr_t* ring, atomic_cnt_t* counters) noexcept
+    pool_ctrl_block_common(uZ            size,    //
+                           uZ            ring_size,
+                           value_t*      data_begin,
+                           atomic_ptr_t* ring,
+                           atomic_cnt_t* counters) noexcept
         requires(!Managed)
     : m_size(size)
     , m_ring_size(ring_size)
+    , m_data_begin(data_begin)
     , m_ring_buffer(ring)
     , m_counters(counters) {};
 
     pool_ctrl_block_common(uZ                size,
                            uZ                ring_size,
+                           value_t*          data_begin,
                            atomic_ptr_t*     ring,
                            atomic_cnt_t*     counters,
                            deallocate_fptr_t deallocate_fptr,
@@ -77,6 +98,7 @@ struct pool_ctrl_block_common {
         requires(Managed)
     : m_size(size)
     , m_ring_size(ring_size)
+    , m_data_begin(data_begin)
     , m_ring_buffer(ring)
     , m_counters(counters)
     , m_destroy_fptr(deallocate_fptr)
@@ -107,7 +129,7 @@ struct pool_ctrl_block_common {
             if (m_ring_buffer[tail].compare_exchange_strong(ptr, nullptr, std::memory_order_acq_rel))
                 break;
         }
-        return {ptr, pool_releaser(this)};
+        return {ptr, this};
     };
 
     void release(T* object_ptr) noexcept {
@@ -183,6 +205,8 @@ struct pool_ctrl_block_common {
 
     using deleted_t   = std::conditional_t<Managed, atomic_cnt_t, decltype([] {})>;
     using abandoned_t = std::conditional_t<Managed, atomic_flg_t, decltype([] {})>;
+    /*using deleted_t   = std::conditional_t<true, atomic_cnt_t, decltype([] {})>;*/
+    /*using abandoned_t = std::conditional_t<true, atomic_flg_t, decltype([] {})>;*/
 
     [[no_unique_address]] deleted_t         m_deleted{};
     [[no_unique_address]] abandoned_t       m_abandoned{};
@@ -199,30 +223,55 @@ template<typename T,
          typename Allocator,
          pool_memory_management MemManagement = pool_memory_management::managed>
 class pool_ctrl_block {
-    using value_t      = T;
-    using ctrl_block_t = pool_ctrl_block_common<value_t, MemManagement == pool_memory_management::managed>;
-    using atomic_ptr_t = ctrl_block_t::atomic_ptr_t;
-    using atomic_cnt_t = ctrl_block_t::atomic_cnt_t;
+    static constexpr bool managed = MemManagement == pool_memory_management::managed;
+
+    using value_t        = T;
+    using common_block_t = pool_ctrl_block_common<value_t, managed>;
+    using atomic_ptr_t   = common_block_t::atomic_ptr_t;
+    using atomic_cnt_t   = common_block_t::atomic_cnt_t;
+    using pointer        = common_block_t::pointer;
 
     using allocator_t  = std::allocator_traits<Allocator>::template rebind_alloc<std::byte>;
     using alloc_traits = std::allocator_traits<allocator_t>;
 
-public:
-    pool_ctrl_block() = delete;
+    friend class pool<T, Allocator, MemManagement>;
 
     explicit pool_ctrl_block(const allocator_t& allocator,
                              std::byte*         storage,
                              uZ                 storage_size,
                              uZ                 size,
                              uZ                 ring_size,
+                             value_t*           data_begin,
                              atomic_ptr_t*      ring,
                              atomic_cnt_t*      element_counters)
-        requires(MemManagement == pool_memory_management::managed)
+        requires(managed)
     : m_allocator(allocator)
     , m_storage_ptr(storage)
     , m_storage_size(storage_size)
-    , m_ctrl_block(size, ring_size, ring, element_counters) {};
+    , m_ctrl_block(size, ring_size, data_begin, ring, element_counters, destroy_and_deallocate_erased, this) {
+    };
+    explicit pool_ctrl_block(const allocator_t& allocator,
+                             std::byte*         storage,
+                             uZ                 storage_size,
+                             uZ                 size,
+                             uZ                 ring_size,
+                             value_t*           data_begin,
+                             atomic_ptr_t*      ring,
+                             atomic_cnt_t*      element_counters)
+        requires(!managed)
+    : m_allocator(allocator)
+    , m_storage_ptr(storage)
+    , m_storage_size(storage_size)
+    , m_ctrl_block(size, ring_size, data_begin, ring, element_counters) {};
 
+    /*pool_ctrl_block_common(uZ            size,    //*/
+    /*                       uZ            ring_size,*/
+    /*                       value_t*      data_begin,*/
+    /*                       atomic_ptr_t* ring,*/
+    /*                       atomic_cnt_t* counters) noexcept*/
+
+public:
+    pool_ctrl_block() = delete;
 
     pool_ctrl_block(const pool_ctrl_block& other)     = delete;
     pool_ctrl_block(pool_ctrl_block&& other) noexcept = delete;
@@ -232,31 +281,21 @@ public:
 
     ~pool_ctrl_block() = default;
 
-
-private:
-    void destroy_and_deallocate() noexcept {
-        m_ctrl_block.cleanup();
-
-        auto  allocator    = m_allocator;
-        auto* storage      = m_storage_ptr;
-        auto  storage_size = m_storage_size;
-        this->~pool_ctrl_block();
-        alloc_traits::deallocate(allocator, storage, storage_size);
+    auto try_acquire() noexcept -> pointer {
+        return m_ctrl_block.try_acquire();
     }
-    static void destroy_and_deallocate(void* ptr) noexcept {
-        reinterpret_cast<pool_ctrl_block*>(ptr)->destroy_and_deallocate();
-    }
+
     void increment() noexcept {
         m_counter.fetch_add(1, std::memory_order_acq_rel);
     }
     void decrement() noexcept {
         auto rem = m_counter.fetch_sub(1, std::memory_order_acq_rel);
         if (rem == 1) {
-            using enum pool_memory_management;
-            if constexpr (MemManagement == managed) {
+            if constexpr (managed) {
                 m_ctrl_block.abandon();
                 return;
             } else {
+                using enum pool_memory_management;
                 if (m_ctrl_block.is_full()) {
                     destroy_and_deallocate();
                     return;
@@ -270,10 +309,19 @@ private:
         }
     }
 
-    static constexpr auto alignment = std::max({alignof(pool_ctrl_block),    //
-                                                alignof(atomic_ptr_t),
-                                                alignof(atomic_cnt_t),
-                                                alignof(value_t)});
+private:
+    void destroy_and_deallocate() noexcept {
+        m_ctrl_block.cleanup();
+
+        auto  allocator    = m_allocator;
+        auto* storage      = m_storage_ptr;
+        auto  storage_size = m_storage_size;
+        this->~pool_ctrl_block();
+        alloc_traits::deallocate(allocator, storage, storage_size);
+    }
+    static void destroy_and_deallocate_erased(void* ptr) noexcept {
+        reinterpret_cast<pool_ctrl_block*>(ptr)->destroy_and_deallocate();
+    }
 
     static constexpr auto next_pow_2(std::uint64_t v) noexcept {
         v--;
@@ -308,74 +356,93 @@ private:
         return non_data_size_al + pool_size * sizeof(value_t);
     }
 
-    static auto allocate(uZ pool_size, const Allocator& allocator, const auto& placement_ctor) {
+    template<typename U>
+    static auto align(uZ count, void*& ptr, uZ& space) -> U* {
+        auto  l_ptr     = ptr;
+        auto  l_space   = space;
+        auto  byte_size = count * sizeof(U);
+        auto* ret       = reinterpret_cast<U*>(std::align(alignof(U), byte_size, l_ptr, l_space));
+        if (ret != nullptr) {
+            l_ptr = reinterpret_cast<std::byte*>(l_ptr) + byte_size;
+            l_space -= byte_size;
+        }
+        ptr   = l_ptr;
+        space = l_space;
+        return ret;
+    }
+
+    static auto allocate(uZ pool_size, const Allocator& allocator, auto placement_ctor) -> pool_ctrl_block* {
+        constexpr auto alignment = std::max({alignof(pool_ctrl_block),    //
+                                             alignof(atomic_ptr_t),
+                                             alignof(atomic_cnt_t),
+                                             alignof(value_t)});
+
         auto  ring_size    = next_pow_2(pool_size);
         auto  raw_size     = calc_size(pool_size, ring_size);
         auto  storage_size = raw_size + alignment - 1;    // ensure alignment possible
         auto  new_alloc    = static_cast<allocator_t>(allocator);
         auto* storage      = alloc_traits::allocate(new_alloc, storage_size);
 
-        auto* ptr      = storage;
+        void* ptr      = storage;
         auto  space    = storage_size;
-        auto* ctrl_ptr = reinterpret_cast<pool_ctrl_block*>(std::align(alignof(pool_ctrl_block),    //
-                                                                       1,
-                                                                       ptr,
-                                                                       space));
+        auto* ctrl_ptr = align<pool_ctrl_block>(1, ptr, space);
         if (ctrl_ptr == nullptr)
-            return;
-        auto* ring_ptr = reinterpret_cast<atomic_ptr_t*>(std::align(alignof(atomic_ptr_t),    //
-                                                                    ring_size,
-                                                                    ptr,
-                                                                    space));
+            return nullptr;
+
+        auto* ring_ptr = align<atomic_ptr_t>(ring_size, ptr, space);
         if (ring_ptr == nullptr)
-            return;
-        auto* cnt_ptr = reinterpret_cast<atomic_cnt_t*>(std::align(alignof(atomic_cnt_t),    //
-                                                                   pool_size,
-                                                                   ptr,
-                                                                   space));
+            return nullptr;
+
+        auto* cnt_ptr = align<atomic_cnt_t>(pool_size, ptr, space);
         if (cnt_ptr == nullptr)
-            return;
-        auto* data_ptr = reinterpret_cast<value_t*>(std::align(alignof(value_t),    //
-                                                               pool_size,
-                                                               ptr,
-                                                               space));
+            return nullptr;
+
+        auto* data_ptr = align<T>(pool_size, ptr, space);
         if (data_ptr == nullptr)
-            return;
+            return nullptr;
 
         bool ctrl_constructed   = false;
         uZ   n_elem_constructed = 0;
         uZ   n_cnt_constructed  = 0;
         uZ   n_ptr_constructed  = 0;
         try {
-            auto* x = new (ctrl_ptr) pool_ctrl_block(new_alloc, pool_size, ring_size, ring_ptr, cnt_ptr);
-            ctrl_constructed = true;
+            new (ctrl_ptr) pool_ctrl_block(new_alloc,    //
+                                           storage,
+                                           storage_size,
+                                           pool_size,
+                                           ring_size,
+                                           data_ptr,
+                                           ring_ptr,
+                                           cnt_ptr);
 
-            for (; n_elem_constructed < pool_size; ++n_elem_constructed)
-                placement_ctor(data_ptr[n_elem_constructed]);
+            ctrl_constructed = true;
             for (; n_ptr_constructed < ring_size; ++n_ptr_constructed)
-                new (ring_ptr[n_ptr_constructed]) atomic_ptr_t{};
+                new (ring_ptr + n_ptr_constructed) atomic_ptr_t{};
             for (; n_cnt_constructed < pool_size; ++n_cnt_constructed)
-                new (cnt_ptr[n_cnt_constructed]) atomic_cnt_t{};
+                new (cnt_ptr + n_cnt_constructed) atomic_cnt_t{};
+            for (; n_elem_constructed < pool_size; ++n_elem_constructed)
+                placement_ctor(data_ptr + n_elem_constructed);
 
         } catch (...) {
             for (uZ i = 0; i < n_cnt_constructed; ++i)
-                cnt_ptr[i]->~atomic_cnt_t();
+                cnt_ptr[i].~atomic_cnt_t();
             for (uZ i = 0; i < n_ptr_constructed; ++i)
-                ring_ptr[i]->~atomic_ptr_t();
+                ring_ptr[i].~atomic_ptr_t();
             for (uZ i = 0; i < n_elem_constructed; ++i)
-                data_ptr[i]->~value_t();
+                data_ptr[i].~value_t();
 
             if (ctrl_constructed)
                 ctrl_ptr->~pool_ctrl_block();
             alloc_traits::deallocate(new_alloc, storage, storage_size);
             throw;
         }
+        return ctrl_ptr;
     };
 
     [[no_unique_address]] allocator_t m_allocator;
     std::byte*                        m_storage_ptr;
     uZ                                m_storage_size;
-    ctrl_block_t                      m_ctrl_block;
+    common_block_t                    m_ctrl_block;
     atomic_cnt_t                      m_counter;
 };
 
@@ -385,6 +452,7 @@ template<typename T, bool Managed>
 class pooled_ptr {
     using ctrl_block_t = detail_::pool_ctrl_block_common<T, Managed>;
     using value_t      = T;
+    friend ctrl_block_t;
 
     pooled_ptr(value_t* data_ptr, ctrl_block_t* ctrl_block_ptr)
     : m_data_ptr(data_ptr)
@@ -423,6 +491,12 @@ public:
     explicit operator bool() const noexcept {
         return m_ctrl_block_ptr != nullptr;
     }
+    auto operator->() noexcept -> value_t* {
+        return m_data_ptr;
+    }
+    auto operator*() noexcept -> value_t& {
+        return *m_data_ptr;
+    }
 
 private:
     value_t*      m_data_ptr;
@@ -452,20 +526,37 @@ public:
     , m_data_ptr{other.m_data_ptr} {
         other.m_ctrl_block_ptr = nullptr;
     };
-    arc_pooled_ptr(const arc_pooled_ptr& other)
+    arc_pooled_ptr(const arc_pooled_ptr& other) noexcept
     : m_ctrl_block_ptr(other.m_ctrl_block_ptr)
     , m_counter_ptr(other.m_counter_ptr)
     , m_data_ptr(other.m_data_ptr) {
         m_counter_ptr->fetch_add(1, std::memory_order_acq_rel);
     };
 
-    arc_pooled_ptr& operator=(arc_pooled_ptr&&)      = default;
-    arc_pooled_ptr& operator=(const arc_pooled_ptr&) = default;
+    arc_pooled_ptr& operator=(arc_pooled_ptr&& other) noexcept {
+        using std::swap;
+        swap(m_data_ptr, other.m_data_ptr);
+        swap(m_ctrl_block_ptr, other.m_ctrl_block_ptr);
+        swap(m_counter_ptr, other.m_counter_ptr);
+        return *this;
+    };
+    arc_pooled_ptr& operator=(const arc_pooled_ptr& other) noexcept {
+        if (m_ctrl_block_ptr != nullptr) {
+            auto refs = m_counter_ptr->fetch_sub(1, std::memory_order_acq_rel);
+            if (refs == 1)
+                m_ctrl_block_ptr->release(m_data_ptr);
+        }
+        m_ctrl_block_ptr = other.m_ctrl_block_ptr;
+        m_counter_ptr    = other.m_counter_ptr;
+        m_data_ptr       = other.m_data_ptr;
+        m_counter_ptr->fetch_add(1, std::memory_order_acq_rel);
+        return *this;
+    }
 
     ~arc_pooled_ptr() {
         if (m_ctrl_block_ptr == nullptr)
             return;
-        auto refs = m_counter_ptr->fetch_sub(std::memory_order_acq_rel);
+        auto refs = m_counter_ptr->fetch_sub(1, std::memory_order_acq_rel);
         if (refs == 1)
             m_ctrl_block_ptr->release(m_data_ptr);
     };
@@ -476,6 +567,12 @@ public:
     explicit operator bool() const noexcept {
         return m_ctrl_block_ptr != nullptr;
     }
+    auto operator->() noexcept -> value_t* {
+        return m_data_ptr;
+    }
+    auto operator*() noexcept -> value_t& {
+        return *m_data_ptr;
+    }
 
 private:
     value_t*      m_data_ptr;
@@ -483,154 +580,41 @@ private:
     atomic_cnt_t* m_counter_ptr;
 };
 
-/**
- * @brief Pool of reusable objects.
- * When necessary creates new elements using provided or generated factory.
- * Uses heap allocated internal control block that persists until the last element is released.
- *
- * @tparam T
- * @tparam Shared if true enables copy construction and assignment.
- */
-template<class T, bool Shared = false>
+template<typename T,
+         typename Allocator                   = std::allocator<T>,
+         pool_memory_management MemManagement = pool_memory_management::managed>
 class pool {
-    friend void swap(pool& first, pool& second) {
-        using std::swap;
-        swap(first.m_ctrl_block, second.m_ctrl_block);
-    };
-    using ctrl_block_ptr_t = std::conditional_t<Shared,
-                                                std::shared_ptr<detail_::pool_ctrl_block_common<T>>,
-                                                detail_::pool_ctrl_block_common<T>*>;
+    static constexpr bool managed = MemManagement == pool_memory_management::managed;
+
+    using ctrl_block_t = detail_::pool_ctrl_block<T, Allocator, MemManagement>;
 
 public:
     using value_type = T;
-    using pointer    = pooled_ptr<value_type>;
+    using pointer    = pooled_ptr<T, managed>;
 
-    /**
-     * @param args arguments passed to operator new when creating data elements.
-     */
-    template<typename... Args>
-        requires std::constructible_from<T, Args...> && (std::copy_constructible<Args> && ...)
-    explicit pool(Args&&... args) {
-        auto ctrl_block_ptr =
-            detail_::allocate_ctrl_block<T>(std::allocator<T>{}, std::forward<Args>(args)...);
-        if constexpr (Shared) {
-            m_ctrl_block = ctrl_block_ptr_t(ctrl_block_ptr,
-                                            [](detail_::pool_ctrl_block_common<T>* ptr) { ptr->abandon(); });
-        } else {
-            m_ctrl_block = ctrl_block_ptr;
-        }
-    };
+    pool() = delete;
 
-    /**
-     * @param allocator allocator used for allocation of internal control block and data elements.
-     * @param args arguments passed to operator new when creating data elements.
-     */
-    template<typename Allocator, typename... Args>
-        requires std::constructible_from<T, Args...> &&
-                 (std::copy_constructible<Args> && ...) && detail_::allocator_of<Allocator, T>
-    explicit pool(std::allocator_arg_t /*unused*/, Allocator allocator, Args&&... args) {
-        auto ctrl_block_ptr = detail_::allocate_ctrl_block<T>(allocator, std::forward<Args>(args)...);
-        if constexpr (Shared) {
-            m_ctrl_block = ctrl_block_ptr_t(
-                ctrl_block_ptr, [](detail_::pool_ctrl_block_common<T>* ptr) { ptr->abandon(); }, allocator);
-        } else {
-            m_ctrl_block = ctrl_block_ptr;
-        }
-    };
+    pool(uZ pool_size, const Allocator& allocator, const auto& placement_ctor)
+    : m_ctrl_ptr{ctrl_block_t::allocate(pool_size, allocator, placement_ctor)} {};
 
-    /**
-     * @param factory invoked to construct object in place `ptr = factory(placement_ptr)`.
-     * @param allocator allocator used for allcation of internal control block and data elements.
-     */
-    template<typename F, typename Allocator = std::allocator<T>>
-        requires detail_::placement_ctor<F, T> && detail_::allocator_of<Allocator, T>
-    //NOLINTNEXTLINE(*forwarding*) const pool& would not satify factory_of<T>
-    explicit pool(F&& factory, Allocator&& allocator = Allocator{}) {
-        auto ctrl_block_ptr =
-            detail_::allocate_ctrl_block<T>(std::forward<Allocator>(allocator), std::forward<F>(factory));
-        if constexpr (Shared) {
-            m_ctrl_block = ctrl_block_ptr_t(ctrl_block_ptr,
-                                            [](detail_::pool_ctrl_block_common<T>* ptr) { ptr->abandon(); });
-        } else {
-            m_ctrl_block = ctrl_block_ptr;
-        }
-    };
-
-    ~pool() {
-        if constexpr (!Shared) {
-            if (m_ctrl_block != nullptr) {
-                m_ctrl_block->abandon();
-            }
-        }
-    }
-    pool(pool&& other) noexcept {
-        swap(*this, other);
-    };
-    pool& operator=(pool&& other) noexcept {
-        swap(*this, other);
-        return *this;
-    };
-
+    pool(pool&&)                 = delete;
     pool(const pool&)            = delete;
+    pool& operator=(pool&&)      = delete;
     pool& operator=(const pool&) = delete;
-
-    pool(const pool&)
-        requires Shared
-    = default;
-    pool& operator=(const pool&)
-        requires Shared
-    = default;
-
-    /**
-     * @brief Creates new data elements and inserts them into pool.
-     *
-     * @param insert_n number of elements to insert.
-     */
-    void populate(uZ insert_n) {
-        m_ctrl_block->populate(insert_n);
-    }
-
-    /**
-     * @brief Acquires an element from pool. If no free elements are available creates a single new element.
-     *
-     * @return pooled_ptr<T> smart pointer to the element.
-     */
-    [[nodiscard]] auto acquire() -> pointer {
-        return m_ctrl_block->acquire();
-    };
-    /**
-     * @brief Attempts to acquire a free element from pool. If no free element are available returns an empty pooled_ptr.
-     *
-     * @return pooled_ptr<T> smart pointer to the element. Empty if no free elements are available.
-     */
-    [[nodiscard]] auto acquire_free() -> pointer {
-        return m_ctrl_block->acquire_free();
+    ~pool() {
+        if (m_ctrl_ptr != nullptr)
+            m_ctrl_ptr->decrement();
     };
 
-    /**
-     * @brief Returns the total number of elements in the pool.
-     * Does not lock mutexes, possibly inaccurate.
-     *
-     * @return uZ number of objects in pool.
-     */
-    [[nodiscard]] auto size() const -> uZ {
-        return m_ctrl_block->size();
+    [[nodiscard]] auto try_acquire() -> pointer {
+        return m_ctrl_ptr->try_acquire();
     }
-    /**
-     * @brief Returns the number of free elements in the pool.
-     * Does not lock mutexes, possibly inaccurate.
-     *
-     * @return uZ number of free objects in pool.
-     */
-    [[nodiscard]] auto free_size() const -> uZ {
-        return m_ctrl_block->free_size();
-    }
+
 
 private:
-    ctrl_block_ptr_t m_ctrl_block = nullptr;
+    ctrl_block_t* m_ctrl_ptr{};
 };
-template<class T>
-using shared_pool = pool<T, true>;
+
 };    // namespace mtmu::ll
 
 #endif
