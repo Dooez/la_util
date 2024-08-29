@@ -16,7 +16,7 @@ using uZ  = std::size_t;
 using u32 = uint32_t;
 
 template<typename T, typename Allocator>
-class pool;
+class span_pool;
 
 template<typename T, bool Managed>
 class pooled_ptr;
@@ -140,7 +140,8 @@ public:
             case status_t::cleaned_up:
                 object_ptr->~T();
                 auto deleted = 1 + m_deleted.fetch_add(1, std::memory_order_acq_rel);
-                if ((deleted + (head.value - m_tail.load(std::memory_order_acquire))) == m_size_ptr) {
+                if ((deleted + (head.value - m_tail.load(std::memory_order_acquire))) ==
+                    m_size_ptr->load(std::memory_order_acquire)) {
                     while (head.status != status_t::cleaned_up)
                         head = m_head.load(std::memory_order_acquire);
                     m_destroy_fptr(m_owner_ptr);
@@ -178,19 +179,19 @@ public:
             if (m_ring_buffer[tail].compare_exchange_strong(ptr, nullptr, std::memory_order_acq_rel))
                 break;
         }
-        return {ptr, this};
+        return {this, ptr};
     };
 
     [[nodiscard]] auto data_end() -> value_t*& {
         return m_data_end;
     }
 
-    void tranasfer(span_pool_ctrl_block* next_block_ptr) {
+    void transfer(span_pool_ctrl_block* next_block_ptr) {
         auto head = m_head.load(std::memory_order_acquire);
         while (!m_head.compare_exchange_strong(head,    //
                                                {head.value, status_t::transferred},
                                                std::memory_order_acq_rel)) {}
-        m_next_block.store(std::memory_order_release);
+        m_next_block.store(next_block_ptr, std::memory_order_release);
         auto tail = m_tail.load(std::memory_order_acquire);
         while (true) {
             while (!m_tail.compare_exchange_strong(tail, tail + 1, std::memory_order_release)) {
@@ -253,6 +254,9 @@ template<typename T, typename Allocator>
 class span_pool_manager_common {
     using allocator_t  = Allocator;
     using alloc_traits = std::allocator_traits<allocator_t>;
+
+    template<typename T_, typename Allocator_>
+    friend class ll3::span_pool;
 
 public:
     span_pool_manager_common()                                           = delete;
@@ -432,7 +436,8 @@ private:
                                         &destroy_erased,
                                         this,
                                         storage_ptr,
-                                        storage_size);
+                                        storage_size,
+                                        data_ptr + m_span_size * emplace_count);
 
             ctrl_constructed = true;
             for (; n_elem_constructed < m_span_size * emplace_count; ++n_elem_constructed)
@@ -538,7 +543,7 @@ private:
             emplace(ptr);
             advance(ctrl_ptr->data_end());
             m_initialized_count.fetch_add(1, std::memory_order_acq_rel);
-            pooled_ptr = {ptr, ctrl_ptr};
+            pooled_ptr = {ctrl_ptr, ptr};
             return pooled_ptr;
         }
 
@@ -548,7 +553,7 @@ private:
         auto ptr = new_ctrl_ptr->data_end();
         emplace(ptr);
         advance(new_ctrl_ptr->data_end());
-        pooled_ptr = {ptr, new_ctrl_ptr};
+        pooled_ptr = {new_ctrl_ptr, ptr};
         m_initialized_count.fetch_add(1, std::memory_order_acq_rel);
         m_ctrl_ptr.store(new_ctrl_ptr, std::memory_order_release);
         ctrl_ptr->transfer(new_ctrl_ptr);
@@ -612,14 +617,13 @@ public:
     : manager_common_t(std::move(alloc), span_size, span_count, ctrl_ptr)
     , m_place_ctor(std::forward<F>(placement_ctor)){};
 
-    virtual void emplace(T* placement_ptr) override {
+    void emplace(T* placement_ptr) override {
         m_place_ctor(placement_ptr);
     }
 
 private:
     PlaceCtor m_place_ctor;
 };
-
 
 }    // namespace detail_
 template<typename T, typename Allocator = std::allocator<T>>
@@ -668,6 +672,44 @@ public:
 
 private:
     manager_t* m_manager_ptr;
+};
+
+template<typename T, bool Managed>
+class pooled_ptr {
+public:
+    pooled_ptr() = default;
+    pooled_ptr(pooled_ptr&& other) noexcept
+    : m_pool_ptr(other.m_pool_ptr)
+    , m_data_ptr(other.m_data_ptr) {
+        other.m_pool_ptr = nullptr;
+    };
+    pooled_ptr(const pooled_ptr&) = delete;
+    pooled_ptr& operator=(pooled_ptr&& other) noexcept {
+        if (m_pool_ptr != nullptr)
+            m_pool_ptr->release(m_data_ptr);
+        m_pool_ptr       = other.m_pool_ptr;
+        m_data_ptr       = other.m_data_ptr;
+        other.m_pool_ptr = nullptr;
+    };
+    pooled_ptr& operator=(const pooled_ptr&) = delete;
+
+    ~pooled_ptr() {
+        if (m_pool_ptr != nullptr)
+            m_pool_ptr->release(m_data_ptr);
+    };
+
+    pooled_ptr(detail_::span_pool_ctrl_block<T>* pool_ptr, T* data_ptr)
+    : m_pool_ptr(pool_ptr)
+    , m_data_ptr(data_ptr) {};
+
+    explicit operator bool() const {
+        return m_pool_ptr != nullptr;
+    }
+
+
+private:
+    detail_::span_pool_ctrl_block<T>* m_pool_ptr{};
+    T*                                m_data_ptr;
 };
 
 }    // namespace mtmu::ll3
