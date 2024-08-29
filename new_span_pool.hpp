@@ -38,7 +38,7 @@ constexpr uZ align_n = 64;
 
 template<typename T>
 class span_pool_ctrl_block {
-    enum class status_t {
+    enum class status_t : std::uint8_t {
         normal,
         abandoned,
         transferred,
@@ -78,7 +78,7 @@ public:
     ~span_pool_ctrl_block()                                      = default;
 
     span_pool_ctrl_block(cnt_t             ring_size,
-                         atomic_ptr_t      ring_buffer,
+                         atomic_ptr_t*     ring_buffer,
                          size_ptr_t        size_ptr,
                          prev_block_t      prev_block,
                          deallocate_fptr_t destoy_fptr,
@@ -99,24 +99,23 @@ public:
     void release(value_t* object_ptr) {
         auto head = m_head.load(std::memory_order_acquire);
         switch (head.status) {
-            using enum status_t;
-        [[likely]] case normal:
+        [[likely]] case status_t::normal:
             break;
-        case transferred: {
+        case status_t::transferred: {
             auto next_block = m_next_block.load(std::memory_order_acquire);
             while (next_block == nullptr)
                 next_block = m_next_block.load(std::memory_order_acquire);
             next_block->release(object_ptr);
             return;
         }
-        case abandoned:
+        case status_t::abandoned:
             [[fallthrough]];
-        case cleaned_up:
+        case status_t::cleaned_up:
             object_ptr->~T();
             auto deleted = 1 + m_deleted.fetch_add(1, std::memory_order_acq_rel);
             if ((deleted + (head.value - m_tail.load(std::memory_order_acquire))) ==
                 m_size_ptr->load(std::memory_order_acquire)) {
-                while (head.status != cleaned_up)
+                while (head.status != status_t::cleaned_up)
                     head = m_head.load(std::memory_order_acquire);
                 m_destroy_fptr(m_owner_ptr);
             }
@@ -127,23 +126,22 @@ public:
                                                {head.value + 1, status_t::normal},
                                                std::memory_order_acq_rel)) {
             switch (head.status) {
-                using enum status_t;
-            [[likely]] case normal:
+            [[likely]] case status_t::normal:
                 break;
-            case transferred: {
+            case status_t::transferred: {
                 auto next_block = m_next_block.load(std::memory_order_acquire);
                 while (next_block == nullptr)
                     next_block = m_next_block.load(std::memory_order_acquire);
                 next_block->release(object_ptr);
                 return;
             }
-            case abandoned:
+            case status_t::abandoned:
                 [[fallthrough]];
-            case cleaned_up:
+            case status_t::cleaned_up:
                 object_ptr->~T();
                 auto deleted = 1 + m_deleted.fetch_add(1, std::memory_order_acq_rel);
                 if ((deleted + (head.value - m_tail.load(std::memory_order_acquire))) == m_size_ptr) {
-                    while (head.status != cleaned_up)
+                    while (head.status != status_t::cleaned_up)
                         head = m_head.load(std::memory_order_acquire);
                     m_destroy_fptr(m_owner_ptr);
                 }
@@ -281,10 +279,10 @@ public:
     virtual void emplace(T* ptr) = 0;
 
     template<typename F>
-    [[nodiscard]] auto make_manager(F&&              placment_ctor,
-                                    const Allocator& allocator,
-                                    uZ               span_size,
-                                    uZ               span_count) -> span_pool_manager_common* {
+    [[nodiscard]] static auto make_manager(F&&       placment_ctor,
+                                           Allocator allocator,
+                                           uZ        span_size,
+                                           uZ        span_count) -> span_pool_manager_common* {
         using place_ctor_t       = std::remove_cvref_t<F>;
         using pool_mngr_t        = span_pool_manager<value_t, Allocator, place_ctor_t>;
         constexpr auto alignment = std::max({alignof(ctrl_block_t),    //
@@ -321,23 +319,36 @@ public:
         uZ   n_elem_constructed = 0;
         uZ   n_ptr_constructed  = 0;
         try {
+            /*span_pool_manager(*/
+            /*    allocator_t&& alloc, uZ span_size, uZ span_count, ctrl_block_t* ctrl_ptr, F&& placement_ctor)*/
+
             new (mngr_ptr) pool_mngr_t(allocator,    //
                                        span_size,
                                        span_count,
                                        ctrl_ptr,
                                        std::forward<F>(placment_ctor));
             mngr_constructed = true;
+            /*span_pool_ctrl_block(cnt_t             ring_size,*/
+            /*                     atomic_ptr_t      ring_buffer,*/
+            /*                     size_ptr_t        size_ptr,*/
+            /*                     prev_block_t      prev_block,*/
+            /*                     deallocate_fptr_t destoy_fptr,*/
+            /*                     owner_ptr_t       owner,*/
+            /*                     storage_ptr_t     storage_ptr,*/
+            /*                     uZ                storage_size,*/
+            /*                     value_t*          data_end)*/
             new (ctrl_ptr) ctrl_block_t(ring_size,    //
                                         ring_ptr,
-                                        &m_initialized_count,
-                                        m_ctrl_ptr,
+                                        &(mngr_ptr->m_initialized_count),
+                                        nullptr,
                                         &destroy_erased,
-                                        this,
+                                        mngr_ptr,
                                         storage_ptr,
-                                        storage_size);
+                                        storage_size,
+                                        data_ptr + span_size * span_count);
             ctrl_constructed = true;
-            for (; n_elem_constructed < m_span_size * span_count; ++n_elem_constructed)
-                emplace(data_ptr + n_elem_constructed);
+            for (; n_elem_constructed < span_size * span_count; ++n_elem_constructed)
+                mngr_ptr->emplace(data_ptr + n_elem_constructed);
             for (; n_ptr_constructed < ring_size; ++n_ptr_constructed)
                 new (ring_ptr + n_ptr_constructed) atomic_ptr_t{};
 
@@ -349,9 +360,9 @@ public:
             if (ctrl_constructed)
                 ctrl_ptr->~ctrl_block_t();
             if (mngr_constructed)
-                mngr_ptr->pool_mngr_t();
+                mngr_ptr->~span_pool_manager_common();
 
-            alloc_traits::deallocate(m_allocator, storage_ptr, storage_size);
+            alloc_traits::deallocate(allocator, storage_ptr, storage_size);
             throw;
         }
         return mngr_ptr;
@@ -556,10 +567,10 @@ private:
         while (ctrl_ptr != nullptr) {
             auto ring_size    = ctrl_ptr->m_ring_size;
             auto ring_buffer  = ctrl_ptr->m_ring_buffer;
-            auto storage      = ctrl_ptr->m_storage;
+            auto storage      = ctrl_ptr->m_storage_ptr;
             auto storage_size = ctrl_ptr->m_storage_size;
             for (uZ i = 0; i < ring_size; ++i) {
-                ring_buffer[i]->~atomic_ptr_t();
+                ring_buffer[i].~atomic_ptr_t();
             }
             alloc_traits::deallocate(alloc, storage, storage_size);
             ctrl_ptr = prev_ptr;
@@ -568,7 +579,7 @@ private:
 
 
     static void destroy_erased(void* this_ptr) {
-        reinterpret_cas<span_pool_manager_common*>(this_ptr)->destroy();
+        reinterpret_cast<span_pool_manager_common*>(this_ptr)->destroy();
     };
 
 
@@ -582,6 +593,7 @@ private:
 
 template<typename T, typename Allocator, typename PlaceCtor>
 class span_pool_manager : span_pool_manager_common<T, Allocator> {
+    friend class span_pool_manager_common<T, Allocator>;
     using allocator_t      = Allocator;
     using manager_common_t = span_pool_manager_common<T, allocator_t>;
     using ctrl_block_t     = manager_common_t::ctrl_block_t;
@@ -596,7 +608,7 @@ public:
 
     template<typename F>
     span_pool_manager(
-        allocator_t&& alloc, uZ span_size, uZ span_count, ctrl_block_t* ctrl_ptr, F&& placement_ctor)
+        allocator_t alloc, uZ span_size, uZ span_count, ctrl_block_t* ctrl_ptr, F&& placement_ctor)
     : manager_common_t(std::move(alloc), span_size, span_count, ctrl_ptr)
     , m_place_ctor(std::forward<F>(placement_ctor)){};
 
@@ -610,13 +622,13 @@ private:
 
 
 }    // namespace detail_
-template<typename T, typename Allocator>
+template<typename T, typename Allocator = std::allocator<T>>
 class span_pool {
-    using manager_t   = detail_::span_pool_manager_common<T, Allocator>;
-    using allocator_t = std::allocator_traits<Allocator>::template rebind_alloc<std::byte>;
+    using allocator_t = typename std::allocator_traits<Allocator>::template rebind_alloc<std::byte>;
+    using manager_t   = detail_::span_pool_manager_common<T, allocator_t>;
 
 public:
-    using pointer = manager_t::pointer;
+    using pointer = typename manager_t::pointer;
 
     span_pool()                            = delete;
     span_pool(span_pool&&)                 = delete;
@@ -626,8 +638,17 @@ public:
     ~span_pool()                           = default;
 
     template<typename F>
+        requires detail_::placement_ctor<F, T>
     span_pool(F&& placement_ctor, uZ span_size, uZ span_count = 0, const Allocator& allocator = {})
     : m_manager_ptr(manager_t::make_manager(std::forward<F>(placement_ctor),    //
+                                            static_cast<allocator_t>(allocator),
+                                            span_size,
+                                            span_count)) {
+        if (m_manager_ptr == nullptr)
+            throw std::runtime_error("Could not allocate storage for span pool");
+    };
+    explicit span_pool(uZ span_size, uZ span_count = 0, const Allocator& allocator = {})
+    : m_manager_ptr(manager_t::make_manager([](T* ptr) { return new (ptr) T{}; },    //
                                             static_cast<allocator_t>(allocator),
                                             span_size,
                                             span_count)) {
