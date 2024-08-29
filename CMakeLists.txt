@@ -19,6 +19,6 @@ if( CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR )
     add_test(queue queue)
 
     add_executable(new_pool tests/test_new_pool.cpp)
-    target_link_libraries(new_pool la_util)
+    target_link_libraries(new_pool la_util atomic)
     set_target_properties(new_pool PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED True)
 endif()

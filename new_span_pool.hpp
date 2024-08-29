@@ -38,7 +38,7 @@ constexpr uZ align_n = 64;
 
 template<typename T>
 class span_pool_ctrl_block {
-    enum class status_t : std::uint8_t {
+    enum class status_t : u32 {
         normal,
         abandoned,
         transferred,
@@ -57,17 +57,23 @@ class span_pool_ctrl_block {
     using owner_ptr_t       = void*;
     using storage_ptr_t     = std::byte*;
 
+
+public:
     struct head_t {
         cnt_t    value{};
         status_t status{};
+
+        bool operator==(const head_t& other) const {
+            return *reinterpret_cast<std::uint64_t*>(this) == *reinterpret_cast<std::uint64_t*>(&other);
+        }
     };
-    using atomic_head_t = aligned<std::atomic<head_t>, align_n>;
-    using atomic_tail_t = aligned<std::atomic<cnt_t>, align_n>;
+    /*using atomic_head_t = aligned<std::atomic<head_t>, align_n>;*/
+    /*using atomic_tail_t = aligned<std::atomic<cnt_t>, align_n>;*/
+    using atomic_head_t = std::atomic<head_t>;
+    using atomic_tail_t = std::atomic<cnt_t>;
 
     static_assert(atomic_head_t::is_always_lock_free);
     static_assert(atomic_tail_t::is_always_lock_free);
-
-public:
     using pointer = pooled_ptr<value_t, true>;
 
     span_pool_ctrl_block()                                       = delete;
@@ -690,6 +696,7 @@ public:
         m_pool_ptr       = other.m_pool_ptr;
         m_data_ptr       = other.m_data_ptr;
         other.m_pool_ptr = nullptr;
+        return *this;
     };
     pooled_ptr& operator=(const pooled_ptr&) = delete;
 
