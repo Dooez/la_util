@@ -6,6 +6,9 @@ set_target_properties(la_util PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED T
 if( CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR )
     enable_testing()
     project(la_util VERSION 0.2.0 LANGUAGES CXX)
+    set(ADR_SAN -fsanitize=address -fno-omit-frame-pointer -g)
+    set(THR_SAN -fsanitize=thread -O2 -g)
+    set(MEM_SAN -fsanitize=memory -fPIE -pie)
 
     set(CMAKE_CXX_STANDARD 20)
     set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -20,5 +23,7 @@ if( CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR )
 
     add_executable(new_pool tests/test_new_pool.cpp)
     target_link_libraries(new_pool la_util atomic)
+    target_compile_options(new_pool PUBLIC ${ADR_SAN})
+    target_link_options(new_pool PUBLIC -fsanitize=address)
     set_target_properties(new_pool PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED True)
 endif()

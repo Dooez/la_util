@@ -201,6 +201,8 @@ public:
                                                std::memory_order_acq_rel)) {}
         m_next_block.store(next_block_ptr, std::memory_order_release);
         auto tail = m_tail.load(std::memory_order_acquire);
+        if (tail == head.value)
+            return;
         while (true) {
             while (!m_tail.compare_exchange_strong(tail, tail + 1, std::memory_order_release)) {
                 if (tail == head.value)
@@ -225,13 +227,14 @@ public:
         while (!m_head.compare_exchange_strong(head,    //
                                                {head.value, status_t::abandoned},
                                                std::memory_order_acq_rel)) {}
-        auto tail = m_tail.load(std::memory_order_acquire);
-        while (tail != head.value) {
-            auto ptr = m_ring_buffer[tail % m_ring_size].load(std::memory_order_acquire);
+        auto tail   = m_tail.load(std::memory_order_acquire);
+        auto i_tail = tail;
+        while (i_tail != head.value) {
+            auto ptr = m_ring_buffer[i_tail % m_ring_size].load(std::memory_order_acquire);
             while (ptr == nullptr)
-                ptr = m_ring_buffer[tail % m_ring_size].load(std::memory_order_acquire);
+                ptr = m_ring_buffer[i_tail % m_ring_size].load(std::memory_order_acquire);
             ptr->~T();
-            ++tail;
+            ++i_tail;
         }
         m_head.store({head.value, status_t::cleaned_up}, std::memory_order_release);
         return head.value - tail;
@@ -339,7 +342,8 @@ public:
                                        ctrl_ptr,
                                        std::forward<F>(placment_ctor));
             mngr_constructed = true;
-            /*span_pool_ctrl_block(cnt_t             ring_size,*/
+            /*span_pool_ctrl_block(cnt_t initial_count,*/
+            /*                     cnt_t             ring_size,*/
             /*                     atomic_ptr_t      ring_buffer,*/
             /*                     size_ptr_t        size_ptr,*/
             /*                     prev_block_t      prev_block,*/
@@ -378,6 +382,12 @@ public:
             throw;
         }
         return mngr_ptr;
+    }
+
+    void abandon() {
+        auto n_destroyed = m_ctrl_ptr.load(std::memory_order_acquire)->abandon();
+        if (n_destroyed == m_total_count)
+            destroy();
     }
 
 private:
@@ -437,6 +447,16 @@ private:
         uZ   n_elem_constructed = 0;
         uZ   n_ptr_constructed  = 0;
         try {
+            /*span_pool_ctrl_block(cnt_t initial_count,*/
+            /*                     cnt_t ring_size,*/
+            /*                     atomic_ptr_t * ring_buffer,*/
+            /*                     size_ptr_t        size_ptr,*/
+            /*                     prev_block_t      prev_block,*/
+            /*                     deallocate_fptr_t destoy_fptr,*/
+            /*                     owner_ptr_t       owner,*/
+            /*                     storage_ptr_t     storage_ptr,*/
+            /*                     uZ                storage_size,*/
+            /*                     value_t * data_end);*/
             new (ctrl_ptr) ctrl_block_t(emplace_count,
                                         ring_size,
                                         ring_ptr,
@@ -556,7 +576,8 @@ private:
             return pooled_ptr;
         }
 
-        auto* new_ctrl_ptr = allocate_and_emplace(m_total_count, next_pow_2(m_total_count * 2));
+        auto  new_count    = m_total_count == 0 ? 2 : m_total_count * 2;
+        auto* new_ctrl_ptr = allocate_and_emplace(new_count - m_total_count, next_pow_2(new_count));
         if (new_ctrl_ptr == nullptr)
             throw std::runtime_error("Could not allocate new pool storage.");
         auto ptr = new_ctrl_ptr->data_end();
@@ -577,12 +598,12 @@ private:
         auto alloc    = m_allocator;
         auto ctrl_ptr = m_ctrl_ptr.load(std::memory_order_acquire);
         this->~span_pool_manager_common();
-        auto prev_ptr = ctrl_ptr->m_prev_block;
         while (ctrl_ptr != nullptr) {
             auto ring_size    = ctrl_ptr->m_ring_size;
             auto ring_buffer  = ctrl_ptr->m_ring_buffer;
             auto storage      = ctrl_ptr->m_storage_ptr;
             auto storage_size = ctrl_ptr->m_storage_size;
+            auto prev_ptr     = ctrl_ptr->m_prev_block;
             for (uZ i = 0; i < ring_size; ++i) {
                 ring_buffer[i].~atomic_ptr_t();
             }
@@ -648,7 +669,9 @@ public:
     span_pool(const span_pool&)            = delete;
     span_pool& operator=(span_pool&&)      = delete;
     span_pool& operator=(const span_pool&) = delete;
-    ~span_pool()                           = default;
+    ~span_pool() {
+        m_manager_ptr->abandon();
+    };
 
     template<typename F>
         requires detail_::placement_ctor<F, T>
