@@ -83,7 +83,8 @@ public:
     span_pool_ctrl_block& operator=(const span_pool_ctrl_block&) = delete;
     ~span_pool_ctrl_block()                                      = default;
 
-    span_pool_ctrl_block(cnt_t             ring_size,
+    span_pool_ctrl_block(cnt_t             initial_count,
+                         cnt_t             ring_size,
                          atomic_ptr_t*     ring_buffer,
                          size_ptr_t        size_ptr,
                          prev_block_t      prev_block,
@@ -92,7 +93,8 @@ public:
                          storage_ptr_t     storage_ptr,
                          uZ                storage_size,
                          value_t*          data_end)
-    : m_ring_size{ring_size}
+    : m_head{head_t{.value = initial_count, .status = status_t::normal}}
+    , m_ring_size{ring_size}
     , m_ring_buffer{ring_buffer}
     , m_size_ptr{size_ptr}
     , m_prev_block{prev_block}
@@ -235,7 +237,6 @@ public:
         return head.value - tail;
     }
 
-
 public:
     atomic_head_t m_head;
     atomic_tail_t m_tail;
@@ -347,7 +348,8 @@ public:
             /*                     storage_ptr_t     storage_ptr,*/
             /*                     uZ                storage_size,*/
             /*                     value_t*          data_end)*/
-            new (ctrl_ptr) ctrl_block_t(ring_size,    //
+            new (ctrl_ptr) ctrl_block_t(span_count,
+                                        ring_size,
                                         ring_ptr,
                                         &(mngr_ptr->m_initialized_count),
                                         nullptr,
@@ -360,7 +362,7 @@ public:
             for (; n_elem_constructed < span_size * span_count; ++n_elem_constructed)
                 mngr_ptr->emplace(data_ptr + n_elem_constructed);
             for (; n_ptr_constructed < ring_size; ++n_ptr_constructed)
-                new (ring_ptr + n_ptr_constructed) atomic_ptr_t{};
+                new (ring_ptr + n_ptr_constructed) atomic_ptr_t{data_ptr + n_ptr_constructed * span_size};
 
         } catch (...) {
             for (uZ i = 0; i < n_ptr_constructed; ++i)
@@ -435,7 +437,8 @@ private:
         uZ   n_elem_constructed = 0;
         uZ   n_ptr_constructed  = 0;
         try {
-            new (ctrl_ptr) ctrl_block_t(ring_size,    //
+            new (ctrl_ptr) ctrl_block_t(emplace_count,
+                                        ring_size,
                                         ring_ptr,
                                         &m_initialized_count,
                                         m_ctrl_ptr,
