@@ -10,13 +10,13 @@ int main() {
     constexpr auto asize = 128;
 
     auto spool = mu::span_pool<int>(1, asize);
-    auto x     = std::array<mu::pooled_ptr<int, true>, asize>{};
+    auto x     = std::array<mu::p_span<int, true>, asize>{};
     for (auto& p: x) {
         p = spool.acquire();
     }
 
     auto spool2 = mu::span_pool<int>(128);
-    auto y      = std::array<mu::pooled_ptr<int, true>, asize>{};
+    auto y      = std::array<mu::p_span<int, true>, asize>{};
     for (int i = 0; i < asize; ++i) {
         y[i] = spool2.acquire();
     }
@@ -49,7 +49,7 @@ int main() {
                     std::this_thread::sleep_for(chr::nanoseconds(50));
                 }
                 for (auto cnt: random_counts[index]) {
-                    auto ptrs = std::array<mu::pooled_ptr<int, true>, max>();
+                    auto ptrs = std::array<mu::p_span<int, true>, max>();
                     for (int i = 0; i < cnt; ++i) {
                         ptrs[i] = spool2.acquire();
                     }

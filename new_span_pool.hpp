@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <exception>
+#include <iostream>
 #include <memory>
 #include <mutex>
 #include <type_traits>
@@ -19,7 +20,7 @@ template<typename T, typename Allocator>
 class span_pool;
 
 template<typename T, bool Managed>
-class pooled_ptr;
+class p_span;
 
 namespace detail_ {
 
@@ -74,7 +75,7 @@ public:
 
     static_assert(atomic_head_t::is_always_lock_free);
     static_assert(atomic_tail_t::is_always_lock_free);
-    using pointer = pooled_ptr<value_t, true>;
+    using pointer = p_span<value_t, true>;
 
     span_pool_ctrl_block()                                       = delete;
     span_pool_ctrl_block(span_pool_ctrl_block&&)                 = delete;
@@ -87,21 +88,23 @@ public:
                          cnt_t             ring_size,
                          atomic_ptr_t*     ring_buffer,
                          size_ptr_t        size_ptr,
+                         uZ                span_size,
                          prev_block_t      prev_block,
                          deallocate_fptr_t destoy_fptr,
                          owner_ptr_t       owner,
                          storage_ptr_t     storage_ptr,
                          uZ                storage_size,
                          value_t*          data_end)
-    : m_head{head_t{.value = initial_count, .status = status_t::normal}}
-    , m_ring_size{ring_size}
-    , m_ring_buffer{ring_buffer}
-    , m_size_ptr{size_ptr}
-    , m_prev_block{prev_block}
-    , m_destroy_fptr{destoy_fptr}
-    , m_owner_ptr{owner}
-    , m_storage_ptr{storage_ptr}
-    , m_storage_size{storage_size}
+    : m_head(head_t{.value = initial_count, .status = status_t::normal})
+    , m_ring_size(ring_size)
+    , m_ring_buffer(ring_buffer)
+    , m_size_ptr(size_ptr)
+    , m_span_size(span_size)
+    , m_prev_block(prev_block)
+    , m_destroy_fptr(destoy_fptr)
+    , m_owner_ptr(owner)
+    , m_storage_ptr(storage_ptr)
+    , m_storage_size(storage_size)
     , m_data_end(data_end) {};
 
     void release(value_t* object_ptr) {
@@ -119,6 +122,7 @@ public:
         case status_t::abandoned:
             [[fallthrough]];
         case status_t::cleaned_up:
+            std::cout << "releasing into cleaned_up block\n";
             object_ptr->~T();
             auto deleted = 1 + m_deleted.fetch_add(1, std::memory_order_acq_rel);
             if ((deleted + (head.value - m_tail.load(std::memory_order_acquire))) ==
@@ -187,7 +191,7 @@ public:
             if (m_ring_buffer[tail].compare_exchange_strong(ptr, nullptr, std::memory_order_acq_rel))
                 break;
         }
-        return {this, ptr};
+        return {this, ptr, m_span_size};
     };
 
     [[nodiscard]] auto data_end() -> value_t*& {
@@ -246,6 +250,7 @@ public:
     cnt_t         m_ring_size;
     atomic_ptr_t* m_ring_buffer;
     size_ptr_t    m_size_ptr;
+    uZ            m_span_size;
 
     std::atomic<cnt_t> m_deleted{};
     next_block_t       m_next_block{};
@@ -281,7 +286,7 @@ public:
     using atomic_ptr_t = aligned<std::atomic<T*>, align_n>;
     using size_t       = std::atomic<cnt_t>;
     using ctrl_block_t = span_pool_ctrl_block<T>;
-    using pointer      = ctrl_block_t::pointer;
+    using span         = ctrl_block_t::pointer;
 
     span_pool_manager_common(allocator_t&& alloc, uZ span_size, uZ span_count, ctrl_block_t* ctrl_ptr)
     : m_allocator(std::move(alloc))
@@ -356,6 +361,7 @@ public:
                                         ring_size,
                                         ring_ptr,
                                         &(mngr_ptr->m_initialized_count),
+                                        span_size,
                                         nullptr,
                                         &destroy_erased,
                                         mngr_ptr,
@@ -386,7 +392,7 @@ public:
 
     void abandon() {
         auto n_destroyed = m_ctrl_ptr.load(std::memory_order_acquire)->abandon();
-        if (n_destroyed == m_total_count)
+        if (n_destroyed == m_initialized_count.load())
             destroy();
     }
 
@@ -447,20 +453,22 @@ private:
         uZ   n_elem_constructed = 0;
         uZ   n_ptr_constructed  = 0;
         try {
-            /*span_pool_ctrl_block(cnt_t initial_count,*/
-            /*                     cnt_t ring_size,*/
-            /*                     atomic_ptr_t * ring_buffer,*/
+            /*span_pool_ctrl_block(cnt_t             initial_count,*/
+            /*                     cnt_t             ring_size,*/
+            /*                     atomic_ptr_t*     ring_buffer,*/
             /*                     size_ptr_t        size_ptr,*/
+            /*                     uZ                span_size,*/
             /*                     prev_block_t      prev_block,*/
             /*                     deallocate_fptr_t destoy_fptr,*/
             /*                     owner_ptr_t       owner,*/
             /*                     storage_ptr_t     storage_ptr,*/
             /*                     uZ                storage_size,*/
-            /*                     value_t * data_end);*/
+            /*                     value_t*          data_end)*/
             new (ctrl_ptr) ctrl_block_t(emplace_count,
                                         ring_size,
                                         ring_ptr,
                                         &m_initialized_count,
+                                        m_span_size,
                                         m_ctrl_ptr,
                                         &destroy_erased,
                                         this,
@@ -551,11 +559,11 @@ private:
         m_initialized_count.store(init_count + emplace_count, std::memory_order_release);
     }
 
-    [[nodiscard]] auto try_acquire() -> pointer {
+    [[nodiscard]] auto try_acquire() -> span {
         return m_ctrl_ptr.load(std::memory_order_acquire)->try_acquire();
     }
 
-    [[nodiscard]] auto acquire() -> pointer {
+    [[nodiscard]] auto acquire() -> span {
         auto* ctrl_ptr   = m_ctrl_ptr.load(std::memory_order_acquire);
         auto  pooled_ptr = ctrl_ptr->try_acquire();
         if (pooled_ptr)
@@ -572,7 +580,7 @@ private:
             emplace(ptr);
             advance(ctrl_ptr->data_end());
             m_initialized_count.fetch_add(1, std::memory_order_acq_rel);
-            pooled_ptr = {ctrl_ptr, ptr};
+            pooled_ptr = {ctrl_ptr, ptr, m_span_size};
             return pooled_ptr;
         }
 
@@ -583,7 +591,7 @@ private:
         auto ptr = new_ctrl_ptr->data_end();
         emplace(ptr);
         advance(new_ctrl_ptr->data_end());
-        pooled_ptr = {new_ctrl_ptr, ptr};
+        pooled_ptr = {new_ctrl_ptr, ptr, m_span_size};
         m_initialized_count.fetch_add(1, std::memory_order_acq_rel);
         m_ctrl_ptr.store(new_ctrl_ptr, std::memory_order_release);
         ctrl_ptr->transfer(new_ctrl_ptr);
@@ -611,7 +619,6 @@ private:
             ctrl_ptr = prev_ptr;
         }
     }
-
 
     static void destroy_erased(void* this_ptr) {
         reinterpret_cast<span_pool_manager_common*>(this_ptr)->destroy();
@@ -662,7 +669,7 @@ class span_pool {
     using manager_t   = detail_::span_pool_manager_common<T, allocator_t>;
 
 public:
-    using pointer = typename manager_t::pointer;
+    using pointer = typename manager_t::span;
 
     span_pool()                            = delete;
     span_pool(span_pool&&)                 = delete;
@@ -707,16 +714,25 @@ private:
 };
 
 template<typename T, bool Managed>
-class pooled_ptr {
+class p_span {
+    friend class detail_::span_pool_ctrl_block<T>;
+    template<typename T_, typename Alloc_>
+    friend class detail_::span_pool_manager_common;
+
+    p_span(detail_::span_pool_ctrl_block<T>* pool_ptr, T* data_ptr, uZ size)
+    : m_pool_ptr(pool_ptr)
+    , m_data_ptr(data_ptr)
+    , m_size(size) {};
+
 public:
-    pooled_ptr() = default;
-    pooled_ptr(pooled_ptr&& other) noexcept
+    p_span() = default;
+    p_span(p_span&& other) noexcept
     : m_pool_ptr(other.m_pool_ptr)
     , m_data_ptr(other.m_data_ptr) {
         other.m_pool_ptr = nullptr;
     };
-    pooled_ptr(const pooled_ptr&) = delete;
-    pooled_ptr& operator=(pooled_ptr&& other) noexcept {
+    p_span(const p_span&) = delete;
+    p_span& operator=(p_span&& other) noexcept {
         if (m_pool_ptr != nullptr)
             m_pool_ptr->release(m_data_ptr);
         m_pool_ptr       = other.m_pool_ptr;
@@ -724,16 +740,13 @@ public:
         other.m_pool_ptr = nullptr;
         return *this;
     };
-    pooled_ptr& operator=(const pooled_ptr&) = delete;
+    p_span& operator=(const p_span&) = delete;
 
-    ~pooled_ptr() {
+    ~p_span() {
         if (m_pool_ptr != nullptr)
             m_pool_ptr->release(m_data_ptr);
     };
 
-    pooled_ptr(detail_::span_pool_ctrl_block<T>* pool_ptr, T* data_ptr)
-    : m_pool_ptr(pool_ptr)
-    , m_data_ptr(data_ptr) {};
 
     explicit operator bool() const {
         return m_pool_ptr != nullptr;
@@ -743,6 +756,7 @@ public:
 private:
     detail_::span_pool_ctrl_block<T>* m_pool_ptr{};
     T*                                m_data_ptr;
+    uZ                                m_size;
 };
 
 }    // namespace mtmu::ll3
