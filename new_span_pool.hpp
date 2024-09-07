@@ -20,7 +20,7 @@ template<typename T, typename Allocator>
 class span_pool;
 
 template<typename T, bool Managed>
-class p_span;
+class pl_span;
 
 namespace detail_ {
 
@@ -75,7 +75,7 @@ public:
 
     static_assert(atomic_head_t::is_always_lock_free);
     static_assert(atomic_tail_t::is_always_lock_free);
-    using pointer = p_span<value_t, true>;
+    using pointer = pl_span<value_t, true>;
 
     span_pool_ctrl_block()                                       = delete;
     span_pool_ctrl_block(span_pool_ctrl_block&&)                 = delete;
@@ -715,49 +715,110 @@ private:
 };
 
 template<typename T, bool Managed>
-class p_span {
+class pl_span : std::ranges::view_base {
     friend class detail_::span_pool_ctrl_block<T>;
     template<typename T_, typename Alloc_>
     friend class detail_::span_pool_manager_common;
 
-    p_span(detail_::span_pool_ctrl_block<T>* pool_ptr, T* data_ptr, uZ size)
+    pl_span(detail_::span_pool_ctrl_block<T>* pool_ptr, T* data_ptr, uZ size)
     : m_pool_ptr(pool_ptr)
     , m_data_ptr(data_ptr)
     , m_size(size) {};
 
 public:
-    p_span() = default;
-    p_span(p_span&& other) noexcept
+    using value_type      = T;
+    using reference       = value_type&;
+    using const_reference = const value_type&;
+    using size_type       = uZ;
+    using difference_type = std::ptrdiff_t;
+    using pointer         = value_type*;
+    using const_pointer   = const value_type*;
+    using iterator        = pointer;
+    using const_iterator  = const_pointer;
+
+    pl_span() = default;
+    pl_span(pl_span&& other) noexcept
     : m_pool_ptr(other.m_pool_ptr)
-    , m_data_ptr(other.m_data_ptr) {
+    , m_data_ptr(other.m_data_ptr)
+    , m_size(other.m_size) {
         other.m_pool_ptr = nullptr;
     };
-    p_span(const p_span&) = delete;
-    p_span& operator=(p_span&& other) noexcept {
+    pl_span(const pl_span&) = delete;
+    pl_span& operator=(pl_span&& other) noexcept {
         if (m_pool_ptr != nullptr)
             m_pool_ptr->release(m_data_ptr);
         m_pool_ptr       = other.m_pool_ptr;
         m_data_ptr       = other.m_data_ptr;
+        m_size           = other.m_size;
         other.m_pool_ptr = nullptr;
         return *this;
     };
-    p_span& operator=(const p_span&) = delete;
+    pl_span& operator=(const pl_span&) = delete;
 
-    ~p_span() {
+    ~pl_span() {
         if (m_pool_ptr != nullptr)
             m_pool_ptr->release(m_data_ptr);
     };
-
 
     explicit operator bool() const {
         return m_pool_ptr != nullptr;
     }
 
+    [[nodiscard]] auto data() noexcept -> pointer {
+        return m_data_ptr;
+    }
+    [[nodiscard]] auto data() const noexcept -> const_pointer {
+        return m_data_ptr;
+    }
+    [[nodiscard]] auto size() const noexcept -> size_type {
+        return m_size;
+    }
+    [[nodiscard]] auto length() const noexcept -> size_type {
+        return size();
+    }
+
+    [[nodiscard]] auto begin() noexcept -> iterator {
+        return data();
+    }
+    [[nodiscard]] auto cbegin() const noexcept -> const_iterator {
+        return data();
+    }
+    [[nodiscard]] auto begin() const noexcept -> const_iterator {
+        return cbegin();
+    }
+
+    [[nodiscard]] auto end() noexcept -> iterator {
+        return data() + size();
+    }
+    [[nodiscard]] auto cend() const noexcept -> const_iterator {
+        return data() + size();
+    }
+    [[nodiscard]] auto end() const noexcept -> const_iterator {
+        return cend();
+    }
+
+    [[nodiscard]] auto operator[](size_type pos) noexcept -> reference {
+        return *(data() + pos);
+    }
+    [[nodiscard]] auto operator[](size_type pos) const noexcept -> const_reference {
+        return *(data() + pos);
+    }
+    [[nodiscard]] auto at(size_type pos) -> reference {
+        if (pos >= size())
+            throw std::out_of_range("pos >= size()");
+        return *(data() + pos);
+    }
+    [[nodiscard]] auto at(size_type pos) const -> const_reference {
+        if (pos >= size())
+            throw std::out_of_range("pos >= size()");
+        return *(data() + pos);
+    }
 
 private:
     detail_::span_pool_ctrl_block<T>* m_pool_ptr{};
     T*                                m_data_ptr;
     uZ                                m_size;
 };
+
 
 }    // namespace mtmu::ll3
