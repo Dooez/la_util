@@ -237,7 +237,8 @@ public:
             auto ptr = m_ring_buffer[i_tail % m_ring_size].load(std::memory_order_acquire);
             while (ptr == nullptr)
                 ptr = m_ring_buffer[i_tail % m_ring_size].load(std::memory_order_acquire);
-            ptr->~T();
+            for (uZ i = 0; i < m_span_size; ++i)
+                ptr[i].~T();
             ++i_tail;
         }
         m_head.store({head.value, status_t::cleaned_up}, std::memory_order_release);
