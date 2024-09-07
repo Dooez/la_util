@@ -27,12 +27,7 @@ int main() {
     constexpr int n_threads = 16;
 
     auto spool2 = mu::span_pool<pooled_t>(
-        [&](pooled_t* ptr) {
-            auto lock = std::scoped_lock(distrib_mutex);
-            return new (ptr) pooled_t(distrib(gen));
-        },
-        128,
-        max * n_threads);
+        [&](pooled_t* ptr) { return new (ptr) pooled_t(distrib(gen)); }, 128, max * n_threads);
     auto y = std::array<mu::pl_span<pooled_t, true>, asize>{};
     for (int i = 0; i < asize; ++i) {
         y[i] = spool2.acquire();
@@ -48,9 +43,11 @@ int main() {
     }
 
     int  repeats  = 2;
-    auto gen_rand = [&] {
-        auto lock = std::scoped_lock(distrib_mutex);
-        auto len  = distrib(gen);
+    auto gen_rand = [] {
+        thread_local std::random_device rd;           // a seed source for the random number engine
+        thread_local std::mt19937       gen(rd());    // mersenne_twister_engine seeded with rd()
+        std::uniform_int_distribution<> distrib(0, max - 1);
+        auto                            len = distrib(gen);
         return std::vector<int>(len);
     };
 
