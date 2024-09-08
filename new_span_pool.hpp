@@ -448,8 +448,9 @@ private:
     }
 
     void abandon() {
+        auto total_size  = m_initialized_count.load(std::memory_order_acquire);
         auto n_destroyed = m_ctrl_ptr.load(std::memory_order_acquire)->abandon();
-        if (n_destroyed == m_initialized_count.load(std::memory_order_acquire))
+        if (n_destroyed == total_size)
             destroy();
     }
 

@@ -133,7 +133,7 @@ int main() {
     /*auto duration = chr::duration_cast<chr::milliseconds>(chr::high_resolution_clock::now() - start_point);*/
     /*std::cout << duration.count() << "ms\n";*/
 
-    for (int i = 0; i < 1024; ++i) {
+    for (int i = 0; i < 8 * 1024; ++i) {
         /*std::cout << i << " ";*/
         test_outlive<pooled_t>();
     }
