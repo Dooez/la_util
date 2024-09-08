@@ -6,7 +6,6 @@
 #include <cstdint>
 #include <cstdlib>
 #include <exception>
-#include <iostream>
 #include <memory>
 #include <mutex>
 #include <ranges>
@@ -149,8 +148,8 @@ private:
         case status_t::abandoned:
             [[fallthrough]];
         case status_t::cleaned_up:
-            std::cout << "releasing into cleaned_up block\n";
-            object_ptr->~T();
+            for (uZ i = 0; i < m_span_size; ++i)
+                object_ptr[i].~T();
             auto deleted = 1 + m_deleted.fetch_add(1, std::memory_order_acq_rel);
             if ((deleted + (head.value - m_tail.load(std::memory_order_acquire))) ==
                 m_pl_size_ptr->load(std::memory_order_acquire)) {
@@ -177,7 +176,8 @@ private:
             case status_t::abandoned:
                 [[fallthrough]];
             case status_t::cleaned_up:
-                object_ptr->~T();
+                for (uZ i = 0; i < m_span_size; ++i)
+                    object_ptr[i].~T();
                 auto deleted = 1 + m_deleted.fetch_add(1, std::memory_order_acq_rel);
                 if ((deleted + (head.value - m_tail.load(std::memory_order_acquire))) ==
                     m_pl_size_ptr->load(std::memory_order_acquire)) {
@@ -766,11 +766,9 @@ public:
     void resize(uZ new_size);
     void reserve(uZ new_capacity);
 
-
 private:
     manager_t* m_manager_ptr;
 };
-
 
 namespace detail_ {
 template<typename T>
@@ -921,7 +919,7 @@ class arc_pl_span : public detail_::span_base<T> {
 
 public:
     arc_pl_span() noexcept = default;
-    explicit arc_pl_span(pl_span<T, true>&& other) noexcept
+    arc_pl_span(pl_span<T, true>&& other) noexcept    //NOLINT (*explicit*)
     : base(other.m_data_ptr, other.m_size)
     , m_pool_ptr(other.m_pool_ptr) {
         other.m_data_ptr = nullptr;
