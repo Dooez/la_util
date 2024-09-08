@@ -499,8 +499,7 @@ private:
                 auto* arc_ptr = reinterpret_cast<arc_t*>(data_ptr + single_span_size * i);
                 ++n_arc_constructed;
                 new (arc_ptr) arc_t();
-                auto* span_begin = reinterpret_cast<T*>(data_ptr + sizeof(arc_t) + single_span_size * i);
-                new (ring_ptr + n_ptr_constructed) atomic_ptr_t(span_begin);
+                new (ring_ptr + n_ptr_constructed) atomic_ptr_t();
                 ++n_ptr_constructed;
             }
 
