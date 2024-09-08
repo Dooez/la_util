@@ -9,6 +9,7 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <ranges>
 #include <type_traits>
 
 namespace mtmu::ll3 {
@@ -770,18 +771,24 @@ private:
     manager_t* m_manager_ptr;
 };
 
-template<typename T, bool Managed>
-class pl_span : std::ranges::view_base {
-    friend class detail_::span_pool_ctrl_block<T>;
-    template<typename T_, typename Alloc_>
-    friend class detail_::span_pool_manager_common;
 
-    pl_span(detail_::span_pool_ctrl_block<T>* pool_ptr, T* data_ptr, uZ size)
-    : m_pool_ptr(pool_ptr)
-    , m_data_ptr(data_ptr)
+namespace detail_ {
+template<typename T>
+class span_base : public std::ranges::view_base {
+protected:
+    span_base() = default;
+    span_base(T* data_ptr, uZ size)
+    : m_data_ptr(data_ptr)
     , m_size(size) {};
 
+    ~span_base() = default;
+
 public:
+    span_base(span_base&& other)            = delete;
+    span_base& operator=(span_base&& other) = delete;
+    span_base(const span_base&)             = delete;
+    span_base& operator=(const span_base&)  = delete;
+
     using value_type      = T;
     using reference       = value_type&;
     using const_reference = const value_type&;
@@ -791,34 +798,6 @@ public:
     using const_pointer   = const value_type*;
     using iterator        = pointer;
     using const_iterator  = const_pointer;
-
-    pl_span() = default;
-    pl_span(pl_span&& other) noexcept
-    : m_pool_ptr(other.m_pool_ptr)
-    , m_data_ptr(other.m_data_ptr)
-    , m_size(other.m_size) {
-        other.m_pool_ptr = nullptr;
-    };
-    pl_span(const pl_span&) = delete;
-    pl_span& operator=(pl_span&& other) noexcept {
-        if (m_pool_ptr != nullptr)
-            m_pool_ptr->release(m_data_ptr);
-        m_pool_ptr       = other.m_pool_ptr;
-        m_data_ptr       = other.m_data_ptr;
-        m_size           = other.m_size;
-        other.m_pool_ptr = nullptr;
-        return *this;
-    };
-    pl_span& operator=(const pl_span&) = delete;
-
-    ~pl_span() {
-        if (m_pool_ptr != nullptr)
-            m_pool_ptr->release(m_data_ptr);
-    };
-
-    explicit operator bool() const {
-        return m_pool_ptr != nullptr;
-    }
 
     [[nodiscard]] auto data() noexcept -> pointer {
         return m_data_ptr;
@@ -840,9 +819,8 @@ public:
         return data();
     }
     [[nodiscard]] auto begin() const noexcept -> const_iterator {
-        return cbegin();
+        return data();
     }
-
     [[nodiscard]] auto end() noexcept -> iterator {
         return data() + size();
     }
@@ -870,11 +848,133 @@ public:
         return *(data() + pos);
     }
 
+    T* m_data_ptr{};
+    uZ m_size{};
+};
+}    // namespace detail_
+
+template<typename T, bool Managed>
+class pl_span : public detail_::span_base<T> {
+    friend class detail_::span_pool_ctrl_block<T>;
+    template<typename T_, typename Alloc_>
+    friend class detail_::span_pool_manager_common;
+    using base = detail_::span_base<T>;
+
+    pl_span(detail_::span_pool_ctrl_block<T>* pool_ptr, T* data_ptr, uZ size) noexcept
+    : base(data_ptr, size)
+    , m_pool_ptr(pool_ptr) {};
+
+public:
+    pl_span() = default;
+    pl_span(pl_span&& other) noexcept
+    : base(other.m_data_ptr, other.m_size)
+    , m_pool_ptr(other.m_pool_ptr) {
+        other.m_data_ptr = nullptr;
+        other.m_size     = 0;
+        other.m_pool_ptr = nullptr;
+    };
+    pl_span& operator=(pl_span&& other) noexcept {
+        if (m_pool_ptr != nullptr)
+            m_pool_ptr->release(base::m_data_ptr);
+        base::m_data_ptr = other.m_data_ptr;
+        base::m_size     = other.m_size;
+        m_pool_ptr       = other.m_pool_ptr;
+        other.m_data_ptr = nullptr;
+        other.m_size     = 0;
+        other.m_pool_ptr = nullptr;
+        return *this;
+    };
+
+    pl_span(const pl_span&)            = delete;
+    pl_span& operator=(const pl_span&) = delete;
+
+    ~pl_span() {
+        if (m_pool_ptr != nullptr)
+            m_pool_ptr->release(base::m_data_ptr);
+    };
+
+    [[nodiscard]] explicit operator bool() const {
+        return m_pool_ptr != nullptr;
+    }
+
 private:
     detail_::span_pool_ctrl_block<T>* m_pool_ptr{};
-    T*                                m_data_ptr;
-    uZ                                m_size;
 };
 
+template<typename T>
+class arc_pl_span : public detail_::span_base<T> {
+    using ctrl_block = detail_::span_pool_ctrl_block<T>;
+    friend ctrl_block;
+    template<typename T_, typename Alloc_>
+    friend class detail_::span_pool_manager_common;
+    using base = detail_::span_base<T>;
+
+    arc_pl_span(ctrl_block* pool_ptr, T* data_ptr, uZ size)
+    : base(data_ptr, size)
+    , m_pool_ptr(pool_ptr) {};
+
+public:
+    arc_pl_span() = default;
+    arc_pl_span(arc_pl_span&& other) noexcept
+    : base(other.m_data_ptr, other.m_size)
+    , m_pool_ptr(other.m_pool_ptr) {
+        other.m_data_ptr = nullptr;
+        other.m_size     = 0;
+        other.m_pool_ptr = nullptr;
+    }
+    arc_pl_span(const arc_pl_span& other) noexcept
+    : base(other.m_data_ptr, other.m_size)
+    , m_pool_ptr(other.m_pool_ptr) {
+        increment();
+    };
+    arc_pl_span& operator=(arc_pl_span&& other) noexcept {
+        if (m_pool_ptr != nullptr && decrement() == 1)
+            m_pool_ptr->release(base::m_data_ptr);
+        base::m_data_ptr = other.m_data_ptr;
+        base::m_size     = other.m_size;
+        m_pool_ptr       = other.m_pool_ptr;
+        other.m_data_ptr = nullptr;
+        other.m_size     = 0;
+        other.m_pool_ptr = nullptr;
+        return *this;
+    };
+    arc_pl_span& operator=(const arc_pl_span& other) noexcept {
+        if (this == &other)
+            return *this;
+        if (m_pool_ptr != nullptr && decrement() == 1)
+            m_pool_ptr->release(base::m_data_ptr);
+        base::m_data_ptr = other.m_data_ptr;
+        base::m_size     = other.m_size;
+        m_pool_ptr       = other.m_pool_ptr;
+        increment();
+        return *this;
+    };
+    ~arc_pl_span() {
+        if (m_pool_ptr == nullptr)
+            return;
+        if (decrement() == 1)
+            m_pool_ptr->release(base::m_data_ptr);
+    };
+
+    [[nodiscard]] explicit operator bool() const {
+        return m_pool_ptr != nullptr;
+    }
+
+private:
+    using arc_t = detail_::span_pool_types<T>::arc_t;
+    auto get_arc_ptr() noexcept -> arc_t* {
+        auto* raw_data_ptr = reinterpret_cast<std::byte*>(base::m_data_ptr);
+        return reinterpret_cast<arc_t*>(raw_data_ptr - sizeof(arc_t));
+    }
+    auto increment() noexcept {
+        auto* arc_ptr = get_arc_ptr();
+        return arc_ptr->fetch_add(1, std::memory_order_acq_rel);
+    }
+    auto decrement() noexcept {
+        auto* arc_ptr = get_arc_ptr();
+        return arc_ptr->fetch_sub(1, std::memory_order_acq_rel);
+    }
+    detail_::span_pool_ctrl_block<T>* m_pool_ptr{};
+};
 
 }    // namespace mtmu::ll3
