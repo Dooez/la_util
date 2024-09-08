@@ -855,17 +855,21 @@ public:
 
 template<typename T, bool Managed>
 class pl_span : public detail_::span_base<T> {
-    friend class detail_::span_pool_ctrl_block<T>;
+    using ctrl_block = detail_::span_pool_ctrl_block<T>;
+    friend ctrl_block;
+
+    friend class arc_pl_span<T>;
+
     template<typename T_, typename Alloc_>
     friend class detail_::span_pool_manager_common;
     using base = detail_::span_base<T>;
 
-    pl_span(detail_::span_pool_ctrl_block<T>* pool_ptr, T* data_ptr, uZ size) noexcept
+    pl_span(ctrl_block* pool_ptr, T* data_ptr, uZ size) noexcept
     : base(data_ptr, size)
     , m_pool_ptr(pool_ptr) {};
 
 public:
-    pl_span() = default;
+    pl_span() noexcept = default;
     pl_span(pl_span&& other) noexcept
     : base(other.m_data_ptr, other.m_size)
     , m_pool_ptr(other.m_pool_ptr) {
@@ -898,7 +902,7 @@ public:
     }
 
 private:
-    detail_::span_pool_ctrl_block<T>* m_pool_ptr{};
+    ctrl_block* m_pool_ptr{};
 };
 
 template<typename T>
@@ -911,10 +915,20 @@ class arc_pl_span : public detail_::span_base<T> {
 
     arc_pl_span(ctrl_block* pool_ptr, T* data_ptr, uZ size)
     : base(data_ptr, size)
-    , m_pool_ptr(pool_ptr) {};
+    , m_pool_ptr(pool_ptr) {
+        increment();
+    };
 
 public:
-    arc_pl_span() = default;
+    arc_pl_span() noexcept = default;
+    explicit arc_pl_span(pl_span<T, true>&& other) noexcept
+    : base(other.m_data_ptr, other.m_size)
+    , m_pool_ptr(other.m_pool_ptr) {
+        other.m_data_ptr = nullptr;
+        other.m_size     = 0;
+        other.m_pool_ptr = nullptr;
+        increment();
+    }
     arc_pl_span(arc_pl_span&& other) noexcept
     : base(other.m_data_ptr, other.m_size)
     , m_pool_ptr(other.m_pool_ptr) {
@@ -956,7 +970,7 @@ public:
             m_pool_ptr->release(base::m_data_ptr);
     };
 
-    [[nodiscard]] explicit operator bool() const {
+    [[nodiscard]] explicit operator bool() const noexcept {
         return m_pool_ptr != nullptr;
     }
 
@@ -974,7 +988,7 @@ private:
         auto* arc_ptr = get_arc_ptr();
         return arc_ptr->fetch_sub(1, std::memory_order_acq_rel);
     }
-    detail_::span_pool_ctrl_block<T>* m_pool_ptr{};
+    ctrl_block* m_pool_ptr{};
 };
 
 }    // namespace mtmu::ll3
