@@ -6,6 +6,8 @@
 #include <cstdint>
 #include <cstdlib>
 #include <exception>
+#include <format>
+#include <iostream>
 #include <memory>
 #include <mutex>
 #include <ranges>
@@ -148,13 +150,15 @@ private:
         case status_t::abandoned:
             [[fallthrough]];
         case status_t::cleaned_up:
+            /*std::cout << object_ptr << "  1";*/
             for (uZ i = 0; i < m_span_size; ++i)
                 object_ptr[i].~T();
-            auto deleted = 1 + m_deleted.fetch_add(1, std::memory_order_acq_rel);
-            if ((deleted + (head.value - m_tail.load(std::memory_order_acquire))) ==
-                m_pl_size_ptr->load(std::memory_order_acquire)) {
-                while (head.status != status_t::cleaned_up)
-                    head = m_head.load(std::memory_order_acquire);
+            auto total_size = m_pl_size_ptr->load(std::memory_order_acquire);
+            auto deleted    = 1 + m_deleted.fetch_add(1, std::memory_order_acq_rel);
+            if (deleted == total_size) {
+                /*while (head.status != status_t::cleaned_up)*/
+                /*    head = m_head.load(std::memory_order_acquire);*/
+                std::cout << "Calling destroy_fptr\n";
                 m_destroy_fptr(m_owner_ptr);
             }
             return;
@@ -176,13 +180,15 @@ private:
             case status_t::abandoned:
                 [[fallthrough]];
             case status_t::cleaned_up:
+                /*std::cout << object_ptr << "  1";*/
                 for (uZ i = 0; i < m_span_size; ++i)
                     object_ptr[i].~T();
-                auto deleted = 1 + m_deleted.fetch_add(1, std::memory_order_acq_rel);
-                if ((deleted + (head.value - m_tail.load(std::memory_order_acquire))) ==
-                    m_pl_size_ptr->load(std::memory_order_acquire)) {
-                    while (head.status != status_t::cleaned_up)
-                        head = m_head.load(std::memory_order_acquire);
+                auto total_size = m_pl_size_ptr->load(std::memory_order_acquire);
+                auto deleted    = 1 + m_deleted.fetch_add(1, std::memory_order_acq_rel);
+                if (deleted == total_size) {
+                    /*while (head.status != status_t::cleaned_up)*/
+                    /*    head = m_head.load(std::memory_order_acquire);*/
+                    std::cout << "Calling destroy_fptr\n";
                     m_destroy_fptr(m_owner_ptr);
                 }
                 return;
@@ -209,6 +215,7 @@ private:
                 return {};
         }
         tail %= m_ring_size;
+        std::cout << std::format("try_acquire tail: {}\n", tail);
         auto ptr = m_ring_buffer[tail].load(std::memory_order_acquire);
         while (true) {
             if (ptr == nullptr) {
@@ -239,13 +246,14 @@ private:
                 if (tail == head.value)
                     return;
             }
-            auto ptr = m_ring_buffer[tail].load(std::memory_order_acquire);
+            auto tail_v = tail % m_ring_size;
+            auto ptr    = m_ring_buffer[tail_v].load(std::memory_order_acquire);
             while (true) {
                 if (ptr == nullptr) {
-                    ptr = m_ring_buffer[tail].load(std::memory_order_acquire);
+                    ptr = m_ring_buffer[tail_v].load(std::memory_order_acquire);
                     continue;
                 }
-                if (m_ring_buffer[tail].compare_exchange_strong(ptr, nullptr, std::memory_order_acq_rel))
+                if (m_ring_buffer[tail_v].compare_exchange_strong(ptr, nullptr, std::memory_order_acq_rel))
                     break;
             }
             next_block_ptr->release(ptr);
@@ -254,26 +262,54 @@ private:
 
     // Marks the pool as abandoned and returns the number of elements destroyed.
     [[nodiscard]] auto abandon() -> cnt_t {
+        std::cout << "abandoning\n";
         auto head = m_head.load(std::memory_order_acquire);
         while (!m_head.compare_exchange_strong(head,    //
                                                {head.value, status_t::abandoned},
                                                std::memory_order_acq_rel)) {}
-        auto tail   = m_tail.load(std::memory_order_acquire);
-        auto i_tail = tail;
-        while (i_tail != head.value) {
-            auto ptr = m_ring_buffer[i_tail % m_ring_size].load(std::memory_order_acquire);
-            while (ptr == nullptr)
-                ptr = m_ring_buffer[i_tail % m_ring_size].load(std::memory_order_acquire);
+        /*auto tail   = m_tail.compare_exchange_strong(std::memory_order_acquire);*/
+        /*auto i_tail = tail;*/
+        /*while (i_tail != head.value) {*/
+        /*    auto ptr = m_ring_buffer[i_tail % m_ring_size].load(std::memory_order_acquire);*/
+        /*    while (ptr == nullptr)*/
+        /*        ptr = m_ring_buffer[i_tail % m_ring_size].load(std::memory_order_acquire);*/
+        /*    for (uZ i = 0; i < m_span_size; ++i)*/
+        /*        ptr[i].~T();*/
+        /*    ++i_tail;*/
+        /*}*/
+
+        auto tail = m_tail.load(std::memory_order_acquire);
+        std::cout << std::format("head: {} tail: {}\n", head.value, tail);
+        auto deleted = 0;
+        while (tail != head.value) {
+            while (!m_tail.compare_exchange_strong(tail, tail + 1, std::memory_order_acq_rel)) {
+                if (tail == head.value)
+                    break;
+            }
+            if (tail == head.value)
+                break;
+            auto ptr = m_ring_buffer[tail % m_ring_size].load(std::memory_order_acquire);
+            while (true) {
+                if (ptr == nullptr) {
+                    ptr = m_ring_buffer[tail % m_ring_size].load(std::memory_order_acquire);
+                    continue;
+                }
+                if (m_ring_buffer[tail % m_ring_size].compare_exchange_strong(
+                        ptr, nullptr, std::memory_order_acq_rel))
+                    break;
+            }
             for (uZ i = 0; i < m_span_size; ++i)
                 ptr[i].~T();
-            ++i_tail;
+            ++deleted;
         }
-        m_head.store({head.value, status_t::cleaned_up}, std::memory_order_release);
-        return head.value - tail;
+        /*m_head.store({head.value, status_t::cleaned_up}, std::memory_order_release);*/
+        return deleted + m_deleted.fetch_add(deleted, std::memory_order_acq_rel);
+        return 0;
+        /*return head.value - tail;*/
     }
 
     atomic_head_t m_head;
-    atomic_tail_t m_tail;
+    atomic_tail_t m_tail{0};
     cnt_t         m_ring_size;
     atomic_ptr_t* m_ring_buffer;
     pl_size_ptr_t m_pl_size_ptr;
@@ -420,7 +456,7 @@ private:
 
     void abandon() {
         auto n_destroyed = m_ctrl_ptr.load(std::memory_order_acquire)->abandon();
-        if (n_destroyed == m_initialized_count.load())
+        if (n_destroyed == m_initialized_count.load(std::memory_order_acquire))
             destroy();
     }
 
@@ -576,7 +612,8 @@ private:
         if (new_size > m_total_count) {
             auto  emplace_count   = m_total_count - init_count;
             auto  new_block_count = new_size - m_total_count;
-            auto* new_ctrl_ptr = allocate_and_emplace(new_block_count, next_pow_2(new_size), new_block_count);
+            auto* new_ctrl_ptr =
+                allocate_and_emplace(new_block_count, next_pow_2(new_size + 1), new_block_count);
             if (new_ctrl_ptr == nullptr)
                 throw std::runtime_error("Could not allocate new pool storage.");
 
@@ -638,7 +675,7 @@ private:
         }
 
         auto  new_count    = m_total_count == 0 ? 2 : m_total_count * 2;
-        auto* new_ctrl_ptr = allocate_and_emplace(new_count - m_total_count, next_pow_2(new_count));
+        auto* new_ctrl_ptr = allocate_and_emplace(new_count - m_total_count, next_pow_2(new_count + 1));
         if (new_ctrl_ptr == nullptr)
             throw std::runtime_error("Could not allocate new pool storage.");
         auto span_begin = new_ctrl_ptr->data_end();
@@ -660,6 +697,7 @@ private:
     }
 
     void destroy() {
+        std::cout << "destroying\n";
         auto alloc    = m_allocator;
         auto ctrl_ptr = m_ctrl_ptr.load(std::memory_order_acquire);
         this->~span_pool_manager_common();

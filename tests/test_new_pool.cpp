@@ -8,20 +8,56 @@
 using pooled_t = std::vector<int>;
 namespace mu   = mtmu::ll3;
 
-constexpr int max        = 32;
+constexpr int max        = 2;
 constexpr int iterations = max * 2;
 constexpr int n_threads  = 16;
 
 template<typename T>
 int test_outlive() {
-    using pooled_t         = T;
-    auto outliving_storage = std::array<mu::pl_span<pooled_t, true>, max>{};
+    using pooled_t = T;
+    using pool_t   = mu::span_pool<pooled_t>;
+    auto start     = std::atomic<bool>();
+    auto apool_ptr = std::atomic<pool_t*>();
+    auto finished  = std::atomic<std::size_t>();
+    auto exit      = std::atomic<bool>();
 
-    constexpr auto place_ctor = [](pooled_t* ptr) { return new (ptr) pooled_t(max); };
+    constexpr auto place_ctor = [](pooled_t* ptr) { return new (ptr) pooled_t(1); };
 
-    auto pool = mu::span_pool<pooled_t>(place_ctor, 2);
-    for (auto& pspan: outliving_storage)
-        pspan = pool.acquire();
+
+    auto worker = [&]() {
+        auto outliving_storage = std::array<mu::pl_span<pooled_t, true>, max>();
+        while (!start.load())
+            std::this_thread::sleep_for(std::chrono::microseconds(50));
+        auto pool_ptr = apool_ptr.load();
+        for (auto& pspan: outliving_storage)
+            pspan = pool_ptr->acquire();
+        auto f = finished.fetch_add(1);
+
+        /*while (finished.load() != n_threads)*/
+        /*    std::this_thread::sleep_for(std::chrono::microseconds(50));*/
+
+        /*while (!exit.load())*/
+        /*    std::this_thread::sleep_for(std::chrono::microseconds(50));*/
+    };
+
+    auto threads = [&worker]<std::size_t... Is>(std::index_sequence<Is...>) {
+        return std::array{std::jthread((void(Is), worker))...};
+    }(std::make_index_sequence<n_threads>{});
+    {
+        auto pool = pool_t(place_ctor, 128);
+        apool_ptr.store(&pool);
+
+        start.store(true);
+        while (finished.load() != n_threads) {
+            std::this_thread::sleep_for(std::chrono::microseconds(50));
+        }
+    }
+    exit.store(true);
+    return 0;
+}
+
+template<typename T>
+int test_threads() {
     return 0;
 }
 
@@ -97,6 +133,9 @@ int main() {
     /*auto duration = chr::duration_cast<chr::milliseconds>(chr::high_resolution_clock::now() - start_point);*/
     /*std::cout << duration.count() << "ms\n";*/
 
-    test_outlive<pooled_t>();
+    for (int i = 0; i < 32; ++i) {
+        std::cout << i << " ";
+        test_outlive<pooled_t>();
+    }
     return 0;
 }
