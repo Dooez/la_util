@@ -150,7 +150,6 @@ private:
         case status_t::abandoned:
             [[fallthrough]];
         case status_t::cleaned_up:
-            /*std::cout << object_ptr << "  1";*/
             for (uZ i = 0; i < m_span_size; ++i)
                 object_ptr[i].~T();
             auto total_size = m_pl_size_ptr->load(std::memory_order_acquire);
@@ -158,7 +157,6 @@ private:
             if (deleted == total_size) {
                 /*while (head.status != status_t::cleaned_up)*/
                 /*    head = m_head.load(std::memory_order_acquire);*/
-                std::cout << "Calling destroy_fptr\n";
                 m_destroy_fptr(m_owner_ptr);
             }
             return;
@@ -180,7 +178,6 @@ private:
             case status_t::abandoned:
                 [[fallthrough]];
             case status_t::cleaned_up:
-                /*std::cout << object_ptr << "  1";*/
                 for (uZ i = 0; i < m_span_size; ++i)
                     object_ptr[i].~T();
                 auto total_size = m_pl_size_ptr->load(std::memory_order_acquire);
@@ -188,7 +185,6 @@ private:
                 if (deleted == total_size) {
                     /*while (head.status != status_t::cleaned_up)*/
                     /*    head = m_head.load(std::memory_order_acquire);*/
-                    std::cout << "Calling destroy_fptr\n";
                     m_destroy_fptr(m_owner_ptr);
                 }
                 return;
@@ -215,7 +211,6 @@ private:
                 return {};
         }
         tail %= m_ring_size;
-        std::cout << std::format("try_acquire tail: {}\n", tail);
         auto ptr = m_ring_buffer[tail].load(std::memory_order_acquire);
         while (true) {
             if (ptr == nullptr) {
@@ -262,7 +257,6 @@ private:
 
     // Marks the pool as abandoned and returns the number of elements destroyed.
     [[nodiscard]] auto abandon() -> cnt_t {
-        std::cout << "abandoning\n";
         auto head = m_head.load(std::memory_order_acquire);
         while (!m_head.compare_exchange_strong(head,    //
                                                {head.value, status_t::abandoned},
@@ -278,8 +272,7 @@ private:
         /*    ++i_tail;*/
         /*}*/
 
-        auto tail = m_tail.load(std::memory_order_acquire);
-        std::cout << std::format("head: {} tail: {}\n", head.value, tail);
+        auto tail    = m_tail.load(std::memory_order_acquire);
         auto deleted = 0;
         while (tail != head.value) {
             while (!m_tail.compare_exchange_strong(tail, tail + 1, std::memory_order_acq_rel)) {
@@ -697,7 +690,6 @@ private:
     }
 
     void destroy() {
-        std::cout << "destroying\n";
         auto alloc    = m_allocator;
         auto ctrl_ptr = m_ctrl_ptr.load(std::memory_order_acquire);
         this->~span_pool_manager_common();
