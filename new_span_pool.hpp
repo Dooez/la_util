@@ -198,14 +198,14 @@ private:
             if (tail == m_head.load(std::memory_order_acquire).value)
                 return {};
         }
-        tail %= m_ring_size;
-        auto ptr = m_ring_buffer[tail].load(std::memory_order_acquire);
+        auto tail_v = tail % m_ring_size;
+        auto ptr    = m_ring_buffer[tail_v].load(std::memory_order_acquire);
         while (true) {
             if (ptr == nullptr) {
-                ptr = m_ring_buffer[tail].load(std::memory_order_acquire);
+                ptr = m_ring_buffer[tail_v].load(std::memory_order_acquire);
                 continue;
             }
-            if (m_ring_buffer[tail].compare_exchange_strong(ptr, nullptr, std::memory_order_acq_rel))
+            if (m_ring_buffer[tail_v].compare_exchange_strong(ptr, nullptr, std::memory_order_acq_rel))
                 break;
         }
         return {this, ptr, m_span_size};
@@ -252,35 +252,13 @@ private:
         auto tail    = m_tail.load(std::memory_order_acquire);
         auto deleted = head.value - tail;
         while (tail != head.value) {
-            auto span_begin = m_ring_buffer[tail % m_ring_size].load(std::memory_order_acquire);
+            auto tail_v     = tail % m_ring_size;
+            auto span_begin = m_ring_buffer[tail_v].load(std::memory_order_acquire);
             while (span_begin == nullptr)
-                span_begin = m_ring_buffer[tail % m_ring_size].load(std::memory_order_acquire);
+                span_begin = m_ring_buffer[tail_v].load(std::memory_order_acquire);
             destroy_span(span_begin);
             ++tail;
         }
-
-        /*auto tail    = m_tail.load(std::memory_order_acquire);*/
-        /*auto deleted = 0;*/
-        /*while (tail != head.value) {*/
-        /*    while (!m_tail.compare_exchange_strong(tail, tail + 1, std::memory_order_acq_rel)) {*/
-        /*        if (tail == head.value)*/
-        /*            break;*/
-        /*    }*/
-        /*    if (tail == head.value)*/
-        /*        break;*/
-        /*    auto span_begin = m_ring_buffer[tail % m_ring_size].load(std::memory_order_acquire);*/
-        /*    while (true) {*/
-        /*        if (span_begin == nullptr) {*/
-        /*            span_begin = m_ring_buffer[tail % m_ring_size].load(std::memory_order_acquire);*/
-        /*            continue;*/
-        /*        }*/
-        /*        if (m_ring_buffer[tail % m_ring_size].compare_exchange_strong(*/
-        /*                span_begin, nullptr, std::memory_order_acq_rel))*/
-        /*            break;*/
-        /*    }*/
-        /*    destroy_span(span_begin);*/
-        /*    ++deleted;*/
-        /*}*/
         return deleted + m_deleted.fetch_add(deleted, std::memory_order_acq_rel);
     }
 
@@ -292,6 +270,7 @@ private:
         auto* arc_ptr   = reinterpret_cast<arc_t*>(raw_begin - sizeof(arc_t));
         arc_ptr->~arc_t();
     }
+
     atomic_head_t m_head;
     atomic_tail_t m_tail{0};
     cnt_t         m_ring_size;
@@ -377,34 +356,25 @@ private:
         if (ring_ptr == nullptr)
             return nullptr;
 
+        // TODO: update to include arc.
         auto data_ptr = align<value_t>(span_size * span_count, ptr, space);
         if (data_ptr == nullptr)
             return nullptr;
 
         bool mngr_constructed   = false;
-        bool ctrl_constructed   = false;
         uZ   n_elem_constructed = 0;
         uZ   n_ptr_constructed  = 0;
         try {
-            /*span_pool_manager(*/
-            /*    allocator_t&& alloc, uZ span_size, uZ span_count, ctrl_block_t* ctrl_ptr, F&& placement_ctor)*/
-
             new (mngr_ptr) pool_mngr_t(allocator,    //
                                        span_size,
                                        span_count,
                                        ctrl_ptr,
                                        std::forward<F>(placment_ctor));
             mngr_constructed = true;
-            /*span_pool_ctrl_block(cnt_t initial_count,*/
-            /*                     cnt_t             ring_size,*/
-            /*                     atomic_ptr_t      ring_buffer,*/
-            /*                     size_ptr_t        size_ptr,*/
-            /*                     prev_block_t      prev_block,*/
-            /*                     deallocate_fptr_t destoy_fptr,*/
-            /*                     owner_ptr_t       owner,*/
-            /*                     storage_ptr_t     storage_ptr,*/
-            /*                     uZ                storage_size,*/
-            /*                     value_t*          data_end)*/
+            for (; n_elem_constructed < span_size * span_count; ++n_elem_constructed)
+                mngr_ptr->emplace(data_ptr + n_elem_constructed);
+            for (; n_ptr_constructed < ring_size; ++n_ptr_constructed)
+                new (ring_ptr + n_ptr_constructed) atomic_ptr_t{data_ptr + n_ptr_constructed * span_size};
             new (ctrl_ptr) ctrl_block_t(span_count,
                                         ring_size,
                                         ring_ptr,
@@ -416,19 +386,12 @@ private:
                                         storage_ptr,
                                         storage_size,
                                         data_ptr + span_size * span_count);
-            ctrl_constructed = true;
-            for (; n_elem_constructed < span_size * span_count; ++n_elem_constructed)
-                mngr_ptr->emplace(data_ptr + n_elem_constructed);
-            for (; n_ptr_constructed < ring_size; ++n_ptr_constructed)
-                new (ring_ptr + n_ptr_constructed) atomic_ptr_t{data_ptr + n_ptr_constructed * span_size};
 
         } catch (...) {
             for (uZ i = 0; i < n_ptr_constructed; ++i)
                 ring_ptr[i].~atomic_ptr_t();
             for (uZ i = 0; i < n_elem_constructed; ++i)
                 data_ptr[i].~value_t();
-            if (ctrl_constructed)
-                ctrl_ptr->~ctrl_block_t();
             if (mngr_constructed)
                 mngr_ptr->~span_pool_manager_common();
 
@@ -493,6 +456,7 @@ private:
         if (ring_ptr == nullptr)
             return nullptr;
 
+        // TODO: check correctness for alignof(arc_t) > alignof(T)
         auto single_span_size = sizeof(arc_t) + m_span_size * sizeof(T);
         auto data_ptr         = align<std::byte, alignof(arc_t)>(single_span_size * span_count, ptr, space);
         if (data_ptr == nullptr)
