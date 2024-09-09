@@ -68,13 +68,13 @@ class span_pool_ctrl_block {
         normal,
         abandoned,
         transferred,
-        cleaned_up,
     };
 
     using cnt_t        = span_pool_types<T>::cnt_t;
     using value_t      = span_pool_types<T>::value_t;
     using atomic_ptr_t = span_pool_types<T>::atomic_ptr_t;
     using pool_size_t  = span_pool_types<T>::pool_size_t;
+    using arc_t        = span_pool_types<T>::arc_t;
 
     using pl_size_ptr_t     = const pool_size_t*;
     using next_block_t      = std::atomic<span_pool_ctrl_block*>;
@@ -135,7 +135,7 @@ private:
     , m_storage_size(storage_size)
     , m_data_end(data_end) {};
 
-    void release(value_t* object_ptr) {
+    void release(value_t* span_begin) {
         auto head = m_head.load(std::memory_order_acquire);
         switch (head.status) {
         [[likely]] case status_t::normal:
@@ -144,21 +144,15 @@ private:
             auto next_block = m_next_block.load(std::memory_order_acquire);
             while (next_block == nullptr)
                 next_block = m_next_block.load(std::memory_order_acquire);
-            next_block->release(object_ptr);
+            next_block->release(span_begin);
             return;
         }
         case status_t::abandoned:
-            [[fallthrough]];
-        case status_t::cleaned_up:
-            for (uZ i = 0; i < m_span_size; ++i)
-                object_ptr[i].~T();
+            destroy_span(span_begin);
             auto total_size = m_pl_size_ptr->load(std::memory_order_acquire);
             auto deleted    = 1 + m_deleted.fetch_add(1, std::memory_order_acq_rel);
-            if (deleted == total_size) {
-                /*while (head.status != status_t::cleaned_up)*/
-                /*    head = m_head.load(std::memory_order_acquire);*/
+            if (deleted == total_size)
                 m_destroy_fptr(m_owner_ptr);
-            }
             return;
         }
 
@@ -172,21 +166,15 @@ private:
                 auto next_block = m_next_block.load(std::memory_order_acquire);
                 while (next_block == nullptr)
                     next_block = m_next_block.load(std::memory_order_acquire);
-                next_block->release(object_ptr);
+                next_block->release(span_begin);
                 return;
             }
             case status_t::abandoned:
-                [[fallthrough]];
-            case status_t::cleaned_up:
-                for (uZ i = 0; i < m_span_size; ++i)
-                    object_ptr[i].~T();
+                destroy_span(span_begin);
                 auto total_size = m_pl_size_ptr->load(std::memory_order_acquire);
                 auto deleted    = 1 + m_deleted.fetch_add(1, std::memory_order_acq_rel);
-                if (deleted == total_size) {
-                    /*while (head.status != status_t::cleaned_up)*/
-                    /*    head = m_head.load(std::memory_order_acquire);*/
+                if (deleted == total_size)
                     m_destroy_fptr(m_owner_ptr);
-                }
                 return;
             };
         }
@@ -197,7 +185,7 @@ private:
                 ptr = m_ring_buffer[head_v].load(std::memory_order_acquire);
                 continue;
             }
-            if (m_ring_buffer[head_v].compare_exchange_strong(ptr, object_ptr, std::memory_order_acq_rel))
+            if (m_ring_buffer[head_v].compare_exchange_strong(ptr, span_begin, std::memory_order_acq_rel))
                 break;
         }
     }
@@ -261,46 +249,49 @@ private:
         while (!m_head.compare_exchange_strong(head,    //
                                                {head.value, status_t::abandoned},
                                                std::memory_order_acq_rel)) {}
-        /*auto tail   = m_tail.compare_exchange_strong(std::memory_order_acquire);*/
-        /*auto i_tail = tail;*/
-        /*while (i_tail != head.value) {*/
-        /*    auto ptr = m_ring_buffer[i_tail % m_ring_size].load(std::memory_order_acquire);*/
-        /*    while (ptr == nullptr)*/
-        /*        ptr = m_ring_buffer[i_tail % m_ring_size].load(std::memory_order_acquire);*/
-        /*    for (uZ i = 0; i < m_span_size; ++i)*/
-        /*        ptr[i].~T();*/
-        /*    ++i_tail;*/
-        /*}*/
-
         auto tail    = m_tail.load(std::memory_order_acquire);
-        auto deleted = 0;
+        auto deleted = head.value - tail;
         while (tail != head.value) {
-            while (!m_tail.compare_exchange_strong(tail, tail + 1, std::memory_order_acq_rel)) {
-                if (tail == head.value)
-                    break;
-            }
-            if (tail == head.value)
-                break;
-            auto ptr = m_ring_buffer[tail % m_ring_size].load(std::memory_order_acquire);
-            while (true) {
-                if (ptr == nullptr) {
-                    ptr = m_ring_buffer[tail % m_ring_size].load(std::memory_order_acquire);
-                    continue;
-                }
-                if (m_ring_buffer[tail % m_ring_size].compare_exchange_strong(
-                        ptr, nullptr, std::memory_order_acq_rel))
-                    break;
-            }
-            for (uZ i = 0; i < m_span_size; ++i)
-                ptr[i].~T();
-            ++deleted;
+            auto span_begin = m_ring_buffer[tail % m_ring_size].load(std::memory_order_acquire);
+            while (span_begin == nullptr)
+                span_begin = m_ring_buffer[tail % m_ring_size].load(std::memory_order_acquire);
+            destroy_span(span_begin);
+            ++tail;
         }
-        /*m_head.store({head.value, status_t::cleaned_up}, std::memory_order_release);*/
+
+        /*auto tail    = m_tail.load(std::memory_order_acquire);*/
+        /*auto deleted = 0;*/
+        /*while (tail != head.value) {*/
+        /*    while (!m_tail.compare_exchange_strong(tail, tail + 1, std::memory_order_acq_rel)) {*/
+        /*        if (tail == head.value)*/
+        /*            break;*/
+        /*    }*/
+        /*    if (tail == head.value)*/
+        /*        break;*/
+        /*    auto span_begin = m_ring_buffer[tail % m_ring_size].load(std::memory_order_acquire);*/
+        /*    while (true) {*/
+        /*        if (span_begin == nullptr) {*/
+        /*            span_begin = m_ring_buffer[tail % m_ring_size].load(std::memory_order_acquire);*/
+        /*            continue;*/
+        /*        }*/
+        /*        if (m_ring_buffer[tail % m_ring_size].compare_exchange_strong(*/
+        /*                span_begin, nullptr, std::memory_order_acq_rel))*/
+        /*            break;*/
+        /*    }*/
+        /*    destroy_span(span_begin);*/
+        /*    ++deleted;*/
+        /*}*/
         return deleted + m_deleted.fetch_add(deleted, std::memory_order_acq_rel);
-        return 0;
-        /*return head.value - tail;*/
     }
 
+    void destroy_span(value_t* span_begin) {
+        for (uZ i = 0; i < m_span_size; ++i) {
+            span_begin[i].~value_t();
+        }
+        auto* raw_begin = reinterpret_cast<std::byte*>(span_begin);
+        auto* arc_ptr   = reinterpret_cast<arc_t*>(raw_begin - sizeof(arc_t));
+        arc_ptr->~arc_t();
+    }
     atomic_head_t m_head;
     atomic_tail_t m_tail{0};
     cnt_t         m_ring_size;
