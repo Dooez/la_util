@@ -319,7 +319,8 @@ protected:
     , m_span_size(span_size)
     , m_initialized_count(span_count)
     , m_total_count(span_count)
-    , m_ctrl_ptr(ctrl_ptr) {};
+    , m_ctrl_ptr(ctrl_ptr)
+    , m_manager_arc(1) {};
 
     virtual void emplace(T* ptr) = 0;
 
@@ -356,25 +357,42 @@ private:
         if (ring_ptr == nullptr)
             return nullptr;
 
-        // TODO: update to include arc.
-        auto data_ptr = align<value_t>(span_size * span_count, ptr, space);
+        auto span_data_size   = span_size * sizeof(T);
+        auto single_span_size = sizeof(arc_t) + span_data_size + span_data_size % alignof(arc_t);
+        auto data_ptr         = align<std::byte, alignof(arc_t)>(single_span_size * span_count, ptr, space);
         if (data_ptr == nullptr)
             return nullptr;
 
         bool mngr_constructed   = false;
         uZ   n_elem_constructed = 0;
         uZ   n_ptr_constructed  = 0;
+        uZ   n_arc_constructed  = 0;
         try {
+            for (uZ i = 0; i < span_count; ++i) {
+                auto* arc_ptr = reinterpret_cast<arc_t*>(data_ptr + single_span_size * i);
+                new (arc_ptr) arc_t();
+                ++n_arc_constructed;
+                auto* span_begin = reinterpret_cast<T*>(data_ptr + sizeof(arc_t) + single_span_size * i);
+                for (uZ i_elem = 0; i_elem < span_size; ++i_elem) {
+                    auto* element_ptr = reinterpret_cast<T*>(span_begin + i_elem * sizeof(T));
+                    placment_ctor(element_ptr);
+                    ++n_elem_constructed;
+                }
+                new (ring_ptr + n_ptr_constructed) atomic_ptr_t(span_begin);
+                ++n_ptr_constructed;
+            }
+
+            for (; n_ptr_constructed < ring_size; ++n_ptr_constructed)
+                new (ring_ptr + n_ptr_constructed) atomic_ptr_t();
+
             new (mngr_ptr) pool_mngr_t(allocator,    //
                                        span_size,
                                        span_count,
                                        ctrl_ptr,
                                        std::forward<F>(placment_ctor));
             mngr_constructed = true;
-            for (; n_elem_constructed < span_size * span_count; ++n_elem_constructed)
-                mngr_ptr->emplace(data_ptr + n_elem_constructed);
-            for (; n_ptr_constructed < ring_size; ++n_ptr_constructed)
-                new (ring_ptr + n_ptr_constructed) atomic_ptr_t{data_ptr + n_ptr_constructed * span_size};
+
+            auto* end_ptr = reinterpret_cast<T*>(data_ptr + sizeof(arc_t) + single_span_size * span_count);
             new (ctrl_ptr) ctrl_block_t(span_count,
                                         ring_size,
                                         ring_ptr,
@@ -385,16 +403,28 @@ private:
                                         mngr_ptr,
                                         storage_ptr,
                                         storage_size,
-                                        data_ptr + span_size * span_count);
+                                        end_ptr);
 
         } catch (...) {
-            for (uZ i = 0; i < n_ptr_constructed; ++i)
-                ring_ptr[i].~atomic_ptr_t();
-            for (uZ i = 0; i < n_elem_constructed; ++i)
-                data_ptr[i].~value_t();
             if (mngr_constructed)
                 mngr_ptr->~span_pool_manager_common();
-
+            for (uZ i = 0; i < n_ptr_constructed; ++i)
+                ring_ptr[i].~atomic_ptr_t();
+            uZ i_span = 0;
+            for (uZ n_elem_destroyed = 0; n_elem_destroyed < n_elem_constructed;) {
+                auto* span_begin = reinterpret_cast<T*>(data_ptr + sizeof(arc_t) + single_span_size * i_span);
+                for (uZ i_elem = 0; i_elem < span_size; ++i_elem) {
+                    if (n_elem_destroyed == n_elem_constructed)
+                        break;
+                    span_begin[i_elem].~T();
+                    ++n_elem_destroyed;
+                }
+                ++i_span;
+            }
+            for (uZ n_arc_destroyed = 0; n_arc_destroyed < n_arc_constructed; ++n_arc_destroyed) {
+                auto* arc_ptr = reinterpret_cast<arc_t*>(data_ptr + single_span_size * n_arc_destroyed);
+                arc_ptr->~arc_t();
+            }
             alloc_traits::deallocate(allocator, storage_ptr, storage_size);
             throw;
         }
@@ -456,8 +486,8 @@ private:
         if (ring_ptr == nullptr)
             return nullptr;
 
-        // TODO: check correctness for alignof(arc_t) > alignof(T)
-        auto single_span_size = sizeof(arc_t) + m_span_size * sizeof(T);
+        auto span_data_size   = m_span_size * sizeof(T);
+        auto single_span_size = sizeof(arc_t) + span_data_size + span_data_size % alignof(arc_t);
         auto data_ptr         = align<std::byte, alignof(arc_t)>(single_span_size * span_count, ptr, space);
         if (data_ptr == nullptr)
             return nullptr;
@@ -546,7 +576,8 @@ private:
         auto ctrl_ring_size_al =
             ctrl_ring_size + (ctrl_ring_size % data_align > 0 ? data_align - ctrl_ring_size % data_align : 0);
 
-        auto single_span_size = sizeof(arc_t) + span_size * sizeof(value_t);
+        auto span_data_size   = span_size * sizeof(value_t);
+        auto single_span_size = sizeof(arc_t) + span_data_size + span_data_size % alignof(arc_t);
         return ctrl_ring_size_al + span_count * single_span_size;
     }
 
@@ -640,9 +671,11 @@ private:
     }
 
     void advance(T*& data_end, cnt_t count = 1) {
-        auto* raw_data_ptr = reinterpret_cast<std::byte*>(data_end);
-        auto* raw_new_end  = raw_data_ptr + sizeof(arc_t) + m_span_size * sizeof(T) * count;
-        data_end           = reinterpret_cast<T*>(raw_new_end);
+        auto* raw_data_ptr     = reinterpret_cast<std::byte*>(data_end);
+        auto  span_data_size   = m_span_size * sizeof(value_t);
+        auto  single_span_size = sizeof(arc_t) + span_data_size + span_data_size % alignof(arc_t);
+        auto* raw_new_end      = raw_data_ptr + single_span_size * count;
+        data_end               = reinterpret_cast<T*>(raw_new_end);
     }
 
     void destroy() {
@@ -667,12 +700,21 @@ private:
         reinterpret_cast<span_pool_manager_common*>(this_ptr)->destroy();
     };
 
+    void increment() {
+        m_manager_arc.fetch_add(1, std::memory_order_acq_rel);
+    }
+    void decrement() {
+        auto cnt = m_manager_arc.fetch_sub(1, std::memory_order_acq_rel);
+        if (cnt == 1)
+            abandon();
+    }
 
     allocator_t                m_allocator;
     uZ                         m_span_size;
     std::atomic<cnt_t>         m_initialized_count;
     cnt_t                      m_total_count;
     std::atomic<ctrl_block_t*> m_ctrl_ptr;
+    std::atomic<uZ>            m_manager_arc;
     std::mutex                 m_resize_mutex{};
 };
 
@@ -714,13 +756,22 @@ class span_pool {
 public:
     using pointer = typename manager_t::span;
 
-    span_pool()                            = delete;
-    span_pool(span_pool&&)                 = delete;
-    span_pool(const span_pool&)            = delete;
+    span_pool() = delete;
+    span_pool(span_pool&& other) noexcept
+    : m_manager_ptr(other.m_manager_ptr) {
+        other.m_manager_ptr = nullptr;
+    };
+    span_pool(const span_pool& other)
+    : m_manager_ptr(other.m_manager_ptr) {
+        m_manager_ptr->increment();
+    };
+
     span_pool& operator=(span_pool&&)      = delete;
     span_pool& operator=(const span_pool&) = delete;
+
     ~span_pool() {
-        m_manager_ptr->abandon();
+        if (m_manager_ptr != nullptr)
+            m_manager_ptr->decrement();
     };
 
     template<typename F>
