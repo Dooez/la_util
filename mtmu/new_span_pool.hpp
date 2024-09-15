@@ -356,8 +356,10 @@ private:
         if (ring_ptr == nullptr)
             return nullptr;
 
-        auto span_data_size   = span_size * sizeof(T);
-        auto single_span_size = sizeof(arc_t) + span_data_size + span_data_size % alignof(arc_t);
+        auto span_data_size = span_size * sizeof(T);
+        auto span_padding =
+            span_data_size % alignof(arc_t) > 0 ? alignof(arc_t) - span_data_size % alignof(arc_t) : 0;
+        auto single_span_size = sizeof(arc_t) + span_data_size + span_padding;
         auto data_ptr         = align<std::byte, alignof(arc_t)>(single_span_size * span_count, ptr, space);
         if (data_ptr == nullptr)
             return nullptr;
@@ -373,8 +375,7 @@ private:
                 ++n_arc_constructed;
                 auto* span_begin = reinterpret_cast<T*>(data_ptr + sizeof(arc_t) + single_span_size * i);
                 for (uZ i_elem = 0; i_elem < span_size; ++i_elem) {
-                    auto* element_ptr = reinterpret_cast<T*>(span_begin + i_elem * sizeof(T));
-                    placment_ctor(element_ptr);
+                    placment_ctor(span_begin + i_elem);
                     ++n_elem_constructed;
                 }
                 new (ring_ptr + n_ptr_constructed) atomic_ptr_t(span_begin);
@@ -486,8 +487,10 @@ private:
         if (ring_ptr == nullptr)
             return nullptr;
 
-        auto span_data_size   = m_span_size * sizeof(T);
-        auto single_span_size = sizeof(arc_t) + span_data_size + span_data_size % alignof(arc_t);
+        auto span_data_size = m_span_size * sizeof(T);
+        auto span_padding =
+            span_data_size % alignof(arc_t) > 0 ? alignof(arc_t) - span_data_size % alignof(arc_t) : 0;
+        auto single_span_size = sizeof(arc_t) + span_data_size + span_padding;
         auto data_ptr         = align<std::byte, alignof(arc_t)>(single_span_size * span_count, ptr, space);
         if (data_ptr == nullptr)
             return nullptr;
@@ -502,8 +505,7 @@ private:
                 new (arc_ptr) arc_t();
                 auto* span_begin = reinterpret_cast<T*>(data_ptr + sizeof(arc_t) + single_span_size * i);
                 for (uZ i_elem = 0; i_elem < m_span_size; ++i_elem) {
-                    auto* element_ptr = reinterpret_cast<T*>(span_begin + i_elem * sizeof(T));
-                    emplace(element_ptr);
+                    emplace(span_begin + i_elem);
                     ++n_elem_constructed;
                 }
                 new (ring_ptr + n_ptr_constructed) atomic_ptr_t(span_begin);
@@ -574,10 +576,11 @@ private:
 
         auto ctrl_ring_size = ctrl_size_al + ring_size * sizeof(atomic_ptr_t);
         auto ctrl_ring_size_al =
-            ctrl_ring_size + (ctrl_ring_size % data_align > 0 ? data_align - ctrl_ring_size % data_align : 0);
+            ctrl_ring_size + (ctrl_ring_size % arc_align > 0 ? arc_align - ctrl_ring_size % arc_align : 0);
 
         auto span_data_size   = span_size * sizeof(value_t);
-        auto single_span_size = sizeof(arc_t) + span_data_size + span_data_size % alignof(arc_t);
+        auto span_padding     = span_data_size % arc_align > 0 ? arc_align - span_data_size % arc_align : 0;
+        auto single_span_size = sizeof(arc_t) + span_data_size + span_padding;
         return ctrl_ring_size_al + span_count * single_span_size;
     }
 
