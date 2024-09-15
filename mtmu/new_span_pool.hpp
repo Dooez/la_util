@@ -3,11 +3,10 @@
 #include <algorithm>
 #include <atomic>
 #include <concepts>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <exception>
-#include <format>
-#include <iostream>
 #include <memory>
 #include <mutex>
 #include <ranges>
@@ -34,7 +33,7 @@ concept allocator_of = std::same_as<typename Allocator::value_type, T>;
 
 template<typename F, typename T>
 concept placement_ctor = requires(F&& p_ctor, T* placement_ptr) {
-    { p_ctor(placement_ptr) } -> std::same_as<T*>;
+    { p_ctor(placement_ptr) };
 };
 template<typename T, uZ align>
 class alignas(std::max(align, alignof(T))) aligned : public T {
@@ -392,7 +391,8 @@ private:
                                        std::forward<F>(placment_ctor));
             mngr_constructed = true;
 
-            auto* end_ptr = reinterpret_cast<T*>(data_ptr + sizeof(arc_t) + single_span_size * span_count);
+            auto* end_ptr = reinterpret_cast<T*>(data_ptr + sizeof(arc_t));
+            mngr_ptr->advance(end_ptr, span_count);
             new (ctrl_ptr) ctrl_block_t(span_count,
                                         ring_size,
                                         ring_ptr,
@@ -521,7 +521,8 @@ private:
             for (; n_ptr_constructed < ring_size; ++n_ptr_constructed)
                 new (ring_ptr + n_ptr_constructed) atomic_ptr_t();
 
-            auto* end_ptr = reinterpret_cast<T*>(data_ptr + sizeof(arc_t) + single_span_size * emplace_count);
+            auto* end_ptr = reinterpret_cast<T*>(data_ptr + sizeof(arc_t));
+            advance(end_ptr, emplace_count);
             new (ctrl_ptr) ctrl_block_t(emplace_count,
                                         ring_size,
                                         ring_ptr,
@@ -556,8 +557,7 @@ private:
             alloc_traits::deallocate(m_allocator, storage_ptr, storage_size);
             throw;
         }
-        advance(ctrl_ptr->data_end(), emplace_count);
-        m_total_count += span_count;
+        m_total_count.fetch_add(span_count, std::memory_order_acq_rel);
         m_initialized_count.fetch_add(emplace_count, std::memory_order_acq_rel);
         return ctrl_ptr;
     }
@@ -609,7 +609,7 @@ private:
                 new_ctrl_ptr->release(data_end);
                 advance(data_end);
             }
-            advance(old_ctrl_ptr->data_end(), emplace_count);
+            /*advance(old_ctrl_ptr->data_end(), emplace_count);*/
             m_initialized_count.fetch_add(emplace_count);
             return;
         }
@@ -623,8 +623,22 @@ private:
             ctrl_ptr->release(data_end);
             advance(data_end);
         }
-        advance(ctrl_ptr->data_end(), emplace_count);
+        /*advance(ctrl_ptr->data_end(), emplace_count);*/
         m_initialized_count.store(init_count + emplace_count, std::memory_order_release);
+    }
+
+    void reserve(uZ new_capacity) {
+        auto lock  = std::scoped_lock(m_resize_mutex);
+        auto count = m_total_count;
+        if (new_capacity <= count)
+            return;
+        auto  new_block_count = new_capacity - count;
+        auto* new_ctrl_ptr    = allocate_and_emplace(new_block_count, next_pow_2(new_capacity + 1));
+        if (new_ctrl_ptr == nullptr)
+            throw std::runtime_error("Could not allocate new pool storage.");
+        auto old_ctrl_ptr = m_ctrl_ptr.load(std::memory_order_acquire);
+        m_ctrl_ptr.store(new_ctrl_ptr, std::memory_order_release);
+        old_ctrl_ptr.transfer(new_ctrl_ptr);
     }
 
     [[nodiscard]] auto try_acquire() -> span {
@@ -712,7 +726,7 @@ private:
     allocator_t                m_allocator;
     uZ                         m_span_size;
     std::atomic<cnt_t>         m_initialized_count;
-    cnt_t                      m_total_count;
+    std::atomic<cnt_t>         m_total_count;
     std::atomic<ctrl_block_t*> m_ctrl_ptr;
     std::atomic<uZ>            m_manager_arc;
     std::mutex                 m_resize_mutex{};
@@ -748,13 +762,32 @@ private:
 };
 
 }    // namespace detail_
+
+
+/**
+ * @brief A pool of dynamic arrays.
+ * Arrays are accessed with owning spans `pl_span<T>` and `arc_pl_span<T>`.
+ * Storage lifetime is tied to both `span_pool` and acquired spans lifetimes,
+ * meaning that spans may outlive the `span_pool` they were acquired from.
+ *
+ * There are two modes of span acquisition:
+ * - Lock-free `try_acquire()` that may fail.
+ * - Potentially locking `acquire()` that may require a lock to allocate new storage.
+ *
+ * Resizing a `span_pool` does not invalidate old spans. Allocated storage is only 
+ * used for new data and new internal structures.
+ *   
+ * @tparam T 
+ * @return 
+ */
 template<typename T, typename Allocator = std::allocator<T>>
 class span_pool {
     using allocator_t = typename std::allocator_traits<Allocator>::template rebind_alloc<std::byte>;
     using manager_t   = detail_::span_pool_manager_common<T, allocator_t>;
 
 public:
-    using pointer = typename manager_t::span;
+    using span     = typename detail_::span_pool_types<T>::span;
+    using arc_span = typename detail_::span_pool_types<T>::arc_span;
 
     span_pool() = delete;
     span_pool(span_pool&& other) noexcept
@@ -774,6 +807,16 @@ public:
             m_manager_ptr->decrement();
     };
 
+    /**
+     * @brief Constructs a new span_pool.
+     *
+     * @param placement_ctor    Placement constructor function object that accepts `T*` argument 
+     *                          and constructs T in place. Used for initialization of values in spans.
+     * @param span_size         Size of an individual span. 
+     * @param span_count        Number of spans to allocate and initialize at construction.
+     * @param allocator         
+     * @return 
+     */
     template<typename F>
         requires detail_::placement_ctor<F, T>
     span_pool(F&& placement_ctor, uZ span_size, uZ span_count = 0, const Allocator& allocator = {})
@@ -784,8 +827,17 @@ public:
         if (m_manager_ptr == nullptr)
             throw std::runtime_error("Could not allocate storage for span pool");
     };
+    /**
+     * @brief Constructs a new span_pool. Values in spans are default-initialized. 
+     *
+     * @param span_size     Size of an individual span. 
+     * @param span_count    Number of spans to allocate and initialize at construction.
+     * @param allocator         
+     * @return 
+     */
     explicit span_pool(uZ span_size, uZ span_count = 0, const Allocator& allocator = {})
-    : m_manager_ptr(manager_t::make_manager([](T* ptr) { return new (ptr) T{}; },    //
+        requires std::default_initializable<T>
+    : m_manager_ptr(manager_t::make_manager([](T* ptr) { new (ptr) T{}; },    //
                                             static_cast<allocator_t>(allocator),
                                             span_size,
                                             span_count)) {
@@ -793,14 +845,69 @@ public:
             throw std::runtime_error("Could not allocate storage for span pool");
     };
 
-    [[nodiscard]] auto try_acquire() -> pointer {
+    /**
+     * @brief Attempts to acquire a span from pool. 
+     * If there are no spans availale returns and empty span.
+     * Lock-free.
+     */
+    [[nodiscard]] auto try_acquire() -> span {
         return m_manager_ptr->try_acquire();
     }
-    [[nodiscard]] auto acquire() -> pointer {
+    /**
+     * @brief Attempts to acquire an atomic reference counted span from pool. 
+     * If there are no spans availale returns and empty span.
+     * Lock-free.
+     */
+    [[nodiscard]] auto try_acquire_arc() -> arc_span {
+        return m_manager_ptr->try_acquire();
+    }
+    /**
+     * @brief Acquires a span from pool.
+     * If there are no spans available locks a mutex, allocates new storage if needed, initializes a span.
+     * If new storage is allocated capacity is doubled.
+     */
+    [[nodiscard]] auto acquire() -> span {
         return m_manager_ptr->acquire();
     }
-    void resize(uZ new_size);
-    void reserve(uZ new_capacity);
+    /**
+     * @brief Acquires an atomic reference counted span from pool.
+     * If there are no spans available locks a mutex, allocates new storage if needed, initializes a span.
+     * If new storage is allocated capacity is doubled.
+     */
+    [[nodiscard]] auto acquire_arc() -> span {
+        return m_manager_ptr->acquire();
+    }
+
+    /**
+     * @brief Resizes the span pool to have at least `new_size` total spans.
+     * If current total span count is bigger than `new_size` this function has no effect.
+     * Locks a mutex to allocate new storage.
+     */
+    void resize(uZ new_size) {
+        m_manager_ptr->resize(new_size);
+    };
+
+    /**
+     * @brief Expands storage to fit at least `new_capacity` total spans.
+     * If current capacity is bigger than `new_capacity` this function has no effect.
+     */
+    void reserve(uZ new_capacity) {
+        m_manager_ptr->reserve(new_capacity);
+    };
+
+    /**
+     * @brief Returns the initialized span count.
+     */
+    [[nodiscard]] auto size() const -> uZ {
+        return m_manager_ptr->m_initialized_count.load(std::memory_order_acquire);
+    }
+
+    /**
+     * @brief Returns the maximum number of spans fitting in the current storage.
+     */
+    [[nodiscard]] auto capacity() const -> uZ {
+        return m_manager_ptr->m_total_count.load(std::memory_order_acquire);
+    }
 
 private:
     manager_t* m_manager_ptr;
@@ -935,6 +1042,15 @@ public:
         return m_pool_ptr != nullptr;
     }
 
+    void reset() {
+        if (m_pool_ptr == nullptr)
+            return;
+        m_pool_ptr->release(base::m_data_ptr);
+        m_pool_ptr       = nullptr;
+        base::m_size     = 0;
+        base::m_data_ptr = nullptr;
+    }
+
 private:
     ctrl_block* m_pool_ptr{};
 };
@@ -1006,6 +1122,16 @@ public:
 
     [[nodiscard]] explicit operator bool() const noexcept {
         return m_pool_ptr != nullptr;
+    }
+
+    void reset() {
+        if (m_pool_ptr == nullptr)
+            return;
+        if (decrement() == 1)
+            m_pool_ptr->release(base::m_data_ptr);
+        m_pool_ptr       = nullptr;
+        base::m_size     = 0;
+        base::m_data_ptr = nullptr;
     }
 
 private:
