@@ -53,12 +53,12 @@ struct span_pool_types {
 
     using cnt_t        = u32;
     using value_t      = T;
-    using atomic_ptr_t = aligned<std::atomic<T*>, align_n>;
-    using arc_t        = aligned<std::atomic<uZ>, alignof(T)>;
+    using atomic_ptr_t = aligned<std::atomic<value_t*>, align_n>;
+    using arc_t        = aligned<std::atomic<uZ>, alignof(value_t)>;
     using pool_size_t  = std::atomic<cnt_t>;
 
-    using span     = ll3::pl_span<T, true>;
-    using arc_span = ll3::arc_pl_span<T>;
+    using span     = ll3::pl_span<value_t, true>;
+    using arc_span = ll3::arc_pl_span<value_t>;
 };
 
 template<typename T>
@@ -602,7 +602,7 @@ private:
 
             auto old_ctrl_ptr = m_ctrl_ptr.load(std::memory_order_acquire);
             m_ctrl_ptr.store(new_ctrl_ptr, std::memory_order_release);
-            old_ctrl_ptr.transfer(new_ctrl_ptr);
+            old_ctrl_ptr->transfer(new_ctrl_ptr);
 
             auto data_end = old_ctrl_ptr->data_end();
             for (uZ i = 0; i < emplace_count; ++i) {
@@ -617,7 +617,7 @@ private:
             return;
         }
         auto emplace_count = static_cast<cnt_t>(new_size) - init_count;
-        auto ctrl_ptr      = m_ctrl_ptr;
+        auto ctrl_ptr      = m_ctrl_ptr.load(std::memory_order_acquire);
         auto data_end      = ctrl_ptr->data_end();
         for (uZ i_span = 0; i_span < emplace_count; ++i_span) {
             for (uZ i_elem = 0; i_elem < m_span_size; ++i_elem) {
@@ -789,8 +789,9 @@ class span_pool {
     using manager_t   = detail_::span_pool_manager_common<T, allocator_t>;
 
 public:
-    using span     = typename detail_::span_pool_types<T>::span;
-    using arc_span = typename detail_::span_pool_types<T>::arc_span;
+    using value_type = typename detail_::span_pool_types<T>::value_t;
+    using span       = typename detail_::span_pool_types<T>::span;
+    using arc_span   = typename detail_::span_pool_types<T>::arc_span;
 
     span_pool() = delete;
     span_pool(span_pool&& other) noexcept

@@ -8,49 +8,95 @@
 using pooled_t = std::vector<int>;
 namespace mu   = mtmu::ll3;
 
-constexpr int max        = 2;
-constexpr int iterations = max * 2;
-constexpr int n_threads  = 16;
+using distrib_t                    = std::uniform_int_distribution<>;
+constexpr int max_spans_per_thread = 128;
+constexpr int max_span_size        = 16;
+constexpr int iterations           = max_spans_per_thread * 2;
+constexpr int n_threads            = 16;
 
 template<typename T>
-int test_outlive() {
-    using pooled_t = T;
-    using pool_t   = mu::span_pool<pooled_t>;
-    auto start     = std::atomic<bool>();
+constexpr auto pool_makers = std::make_tuple(    //
+    [](const auto& ctor) { return mu::span_pool<T>(ctor, 128); },
+    [](const auto& ctor) { return mu::span_pool<T>(ctor, 128, 128); }
+    //
+);
+template<typename T>
+struct preallocated_pool_ctor {
+    using pool_t = mu::span_pool<T>;
+    std::random_device rd;           // a seed source for the random number engine*/
+    std::mt19937       gen{rd()};    // mersenne_twister_engine seeded with rd()
+                                     /*std::mutex                      distrib_mutex;*/
+    distrib_t span_size_distr{1, max_span_size};
+    distrib_t prealloc_distr{0, (max_spans_per_thread * n_threads)};
+
+    auto operator()(auto&& elem_plcae_ctor) -> pool_t {
+        return pool_t(elem_plcae_ctor, span_size_distr(gen), prealloc_distr(gen));
+    }
+};
+
+
+template<typename T>
+struct resized_pool_ctor {
+    using pool_t = mu::span_pool<T>;
+    std::random_device rd;           // a seed source for the random number engine*/
+    std::mt19937       gen{rd()};    // mersenne_twister_engine seeded with rd()
+                                     /*std::mutex                      distrib_mutex;*/
+    static constexpr int max_resize = 128;
+
+    distrib_t span_size_distr{1, max_span_size};
+    distrib_t resize_distr{0, (max_spans_per_thread * n_threads)};
+
+    auto operator()(auto&& elem_plcae_ctor) -> pool_t {
+        auto pool = pool_t(elem_plcae_ctor, span_size_distr(gen));
+        pool.resize(resize_distr(gen));
+        return pool;
+    }
+};
+
+
+int test_outlive(auto&& pool_ctor, auto&& elem_place_ctor) {
+    using pool_t   = decltype(pool_ctor(elem_place_ctor));
+    using pooled_t = pool_t::value_type;
     auto apool_ptr = std::atomic<pool_t*>();
+    auto start     = std::atomic<bool>();
+    auto ready     = std::atomic<std::size_t>();
     auto finished  = std::atomic<std::size_t>();
     auto exit      = std::atomic<bool>();
 
-    constexpr auto place_ctor = [](pooled_t* ptr) { return new (ptr) pooled_t(1); };
-
+    std::random_device rd;           // a seed source for the random number engine*/
+    std::mt19937       gen{rd()};    // mersenne_twister_engine seeded with rd()
+    std::mutex         distrib_mutex;
+    distrib_t          span_size_distr{1, max_spans_per_thread};
 
     auto worker = [&]() {
-        auto outliving_storage = std::array<mu::pl_span<pooled_t, true>, max>();
+        auto outliving_storage = std::array<mu::pl_span<pooled_t, true>, max_spans_per_thread>();
+        int  count;
+        {
+            auto lock = std::scoped_lock(distrib_mutex);
+            count     = span_size_distr(gen);
+        }
+        ready.fetch_add(1);
         while (!start.load())
             std::this_thread::sleep_for(std::chrono::microseconds(50));
         auto pool_ptr = apool_ptr.load();
-        for (auto& pspan: outliving_storage)
-            pspan = pool_ptr->acquire();
+        for (int i = 0; i < count; ++i)
+            outliving_storage[i] = pool_ptr->acquire();
         auto f = finished.fetch_add(1);
-
-        /*while (finished.load() != n_threads)*/
-        /*    std::this_thread::sleep_for(std::chrono::microseconds(50));*/
-
-        /*while (!exit.load())*/
-        /*    std::this_thread::sleep_for(std::chrono::microseconds(50));*/
+        while (finished.load() != n_threads)
+            std::this_thread::sleep_for(std::chrono::microseconds(1));
     };
 
     auto threads = [&worker]<std::size_t... Is>(std::index_sequence<Is...>) {
         return std::array{std::jthread((void(Is), worker))...};
     }(std::make_index_sequence<n_threads>{});
     {
-        auto pool = pool_t(place_ctor, 128);
+        auto pool = pool_ctor(elem_place_ctor);
         apool_ptr.store(&pool);
-
-        start.store(true);
-        while (finished.load() != n_threads) {
+        while (ready.load() != n_threads)
             std::this_thread::sleep_for(std::chrono::microseconds(50));
-        }
+        start.store(true);
+        while (finished.load() != n_threads)
+            std::this_thread::sleep_for(std::chrono::microseconds(1));
     }
     exit.store(true);
     return 0;
@@ -63,79 +109,10 @@ int test_threads() {
 
 
 int main() {
-    /*constexpr auto                  asize = 128;*/
-    /*constexpr int                   max   = 32;*/
-    /*std::random_device              rd;           // a seed source for the random number engine*/
-    /*std::mt19937                    gen(rd());    // mersenne_twister_engine seeded with rd()*/
-    /*std::mutex                      distrib_mutex;*/
-    /*std::uniform_int_distribution<> distrib(0, max - 1);*/
-    /**/
-    /*constexpr int iterations = max * 2;*/
-    /*constexpr int n_threads  = 16;*/
-    /**/
-    /*auto spool = mu::span_pool<pooled_t>(*/
-    /*    [&](pooled_t* ptr) { return new (ptr) pooled_t(distrib(gen)); }, 128, max * n_threads);*/
-    /*auto y = std::array<mu::pl_span<pooled_t, true>, asize>{};*/
-    /*for (int i = 0; i < asize; ++i) {*/
-    /*    y[i] = spool.acquire();*/
-    /*}*/
-    /**/
-    /**/
-    /*auto random_counts = std::array<std::vector<int>, n_threads>();*/
-    /*for (auto& vec: random_counts) {*/
-    /*    vec = std::vector<int>(iterations);*/
-    /**/
-    /*    for (auto& v: vec)*/
-    /*        v = distrib(gen);*/
-    /*}*/
-    /**/
-    /*int  repeats     = 2;*/
-    /*auto make_pl_obj = [] {*/
-    /*    thread_local std::random_device rd;           // a seed source for the random number engine*/
-    /*    thread_local std::mt19937       gen(rd());    // mersenne_twister_engine seeded with rd()*/
-    /*    std::uniform_int_distribution<> distrib(0, max - 1);*/
-    /*    auto                            len = distrib(gen);*/
-    /*    return std::vector<int>(len);*/
-    /*};*/
-    /*auto modify_pl_obj = [](pooled_t& obj) {*/
-    /*    thread_local std::random_device rd;           // a seed source for the random number engine*/
-    /*    thread_local std::mt19937       gen(rd());    // mersenne_twister_engine seeded with rd()*/
-    /*    std::uniform_int_distribution<> distrib(0, max - 1);*/
-    /*    for (auto& v: obj) {*/
-    /*        auto val = distrib(gen);*/
-    /*        v        = val;*/
-    /*    }*/
-    /*};*/
-    /**/
-    /*namespace chr    = std::chrono;*/
-    /*auto start_point = chr::high_resolution_clock::now();*/
-    /*for (int i = 0; i < repeats; ++i) {*/
-    /*    auto start   = std::atomic<bool>(false);*/
-    /*    auto threads = [&]<std::size_t... I>(std::index_sequence<I...>) {*/
-    /*        return std::array{std::jthread(([&, index = I] {*/
-    /*            while (!start.load(std::memory_order_acquire)) {*/
-    /*                std::this_thread::sleep_for(chr::nanoseconds(50));*/
-    /*            }*/
-    /*            for (auto cnt: random_counts[index]) {*/
-    /*                auto spans = std::array<mu::pl_span<pooled_t, true>, max>();*/
-    /*                for (int i = 0; i < cnt; ++i) {*/
-    /*                    spans[i] = spool.acquire();*/
-    /*                    for (auto& v: spans[i]) {*/
-    /*                        v = make_pl_obj();*/
-    /*                        modify_pl_obj(v);*/
-    /*                    }*/
-    /*                }*/
-    /*            }*/
-    /*        }))...};*/
-    /*    }(std::make_index_sequence<n_threads>{});*/
-    /*    start.store(true, std::memory_order_release);*/
-    /*}*/
-    /*auto duration = chr::duration_cast<chr::milliseconds>(chr::high_resolution_clock::now() - start_point);*/
-    /*std::cout << duration.count() << "ms\n";*/
-
-    for (int i = 0; i < 8 * 1024; ++i) {
+    for (int i = 0; i < 512; ++i) {
         /*std::cout << i << " ";*/
-        test_outlive<pooled_t>();
+        test_outlive(preallocated_pool_ctor<pooled_t>(), [](pooled_t* ptr) { new (ptr) pooled_t{1}; });
+        test_outlive(resized_pool_ctor<pooled_t>(), [](pooled_t* ptr) { new (ptr) pooled_t{1}; });
     }
     return 0;
 }
