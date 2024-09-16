@@ -52,6 +52,23 @@ struct resized_pool_ctor {
         return pool;
     }
 };
+template<typename T>
+struct reserved_pool_ctor {
+    using pool_t = mu::span_pool<T>;
+    std::random_device rd;           // a seed source for the random number engine*/
+    std::mt19937       gen{rd()};    // mersenne_twister_engine seeded with rd()
+                                     /*std::mutex                      distrib_mutex;*/
+    static constexpr int max_resize = 128;
+
+    distrib_t span_size_distr{1, max_span_size};
+    distrib_t reserve_distr{0, (max_spans_per_thread * n_threads)};
+
+    auto operator()(auto&& elem_plcae_ctor) -> pool_t {
+        auto pool = pool_t(elem_plcae_ctor, span_size_distr(gen));
+        pool.reserve(reserve_distr(gen));
+        return pool;
+    }
+};
 
 
 int test_outlive(auto&& pool_ctor, auto&& elem_place_ctor) {
@@ -113,6 +130,7 @@ int main() {
         /*std::cout << i << " ";*/
         test_outlive(preallocated_pool_ctor<pooled_t>(), [](pooled_t* ptr) { new (ptr) pooled_t{1}; });
         test_outlive(resized_pool_ctor<pooled_t>(), [](pooled_t* ptr) { new (ptr) pooled_t{1}; });
+        test_outlive(reserved_pool_ctor<pooled_t>(), [](pooled_t* ptr) { new (ptr) pooled_t{1}; });
     }
     return 0;
 }

@@ -588,13 +588,14 @@ private:
         auto init_count = m_initialized_count.load(std::memory_order_acquire);
         if (new_size <= init_count)
             return;
-        auto lock  = std::scoped_lock(m_resize_mutex);
-        init_count = m_initialized_count.load(std::memory_order_acquire);
+        auto lock        = std::scoped_lock(m_resize_mutex);
+        init_count       = m_initialized_count.load(std::memory_order_acquire);
+        auto total_count = m_total_count.load(std::memory_order_acquire);
         if (new_size <= init_count)
             return;
-        if (new_size > m_total_count) {
-            auto  emplace_count   = m_total_count - init_count;
-            auto  new_block_count = new_size - m_total_count;
+        if (new_size > total_count) {
+            auto  emplace_count   = total_count - init_count;
+            auto  new_block_count = new_size - total_count;
             auto* new_ctrl_ptr =
                 allocate_and_emplace(new_block_count, next_pow_2(new_size + 1), new_block_count);
             if (new_ctrl_ptr == nullptr)
@@ -602,6 +603,7 @@ private:
 
             auto old_ctrl_ptr = m_ctrl_ptr.load(std::memory_order_acquire);
             m_ctrl_ptr.store(new_ctrl_ptr, std::memory_order_release);
+            m_total_count.store(new_size, std::memory_order_release);
             old_ctrl_ptr->transfer(new_ctrl_ptr);
 
             auto data_end = old_ctrl_ptr->data_end();
@@ -632,16 +634,29 @@ private:
 
     void reserve(uZ new_capacity) {
         auto lock  = std::scoped_lock(m_resize_mutex);
-        auto count = m_total_count;
+        auto count = m_total_count.load(std::memory_order_acquire);
         if (new_capacity <= count)
             return;
+        auto  emplace_count   = count - m_initialized_count.load(std::memory_order_acquire);
         auto  new_block_count = new_capacity - count;
-        auto* new_ctrl_ptr    = allocate_and_emplace(new_block_count, next_pow_2(new_capacity + 1));
+        auto* new_ctrl_ptr    = allocate_and_emplace(new_block_count, next_pow_2(new_capacity));
         if (new_ctrl_ptr == nullptr)
             throw std::runtime_error("Could not allocate new pool storage.");
         auto old_ctrl_ptr = m_ctrl_ptr.load(std::memory_order_acquire);
         m_ctrl_ptr.store(new_ctrl_ptr, std::memory_order_release);
-        old_ctrl_ptr.transfer(new_ctrl_ptr);
+        m_total_count.store(new_capacity, std::memory_order_release);
+        old_ctrl_ptr->transfer(new_ctrl_ptr);
+
+        auto data_end = old_ctrl_ptr->data_end();
+        for (uZ i = 0; i < emplace_count; ++i) {
+            for (uZ i = 0; i < m_span_size; ++i) {
+                emplace(data_end + i);
+            }
+            new_ctrl_ptr->release(data_end);
+            advance(data_end);
+        }
+        /*advance(old_ctrl_ptr->data_end(), emplace_count);*/
+        m_initialized_count.fetch_add(emplace_count);
     }
 
     [[nodiscard]] auto try_acquire() -> span {
